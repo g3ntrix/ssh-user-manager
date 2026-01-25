@@ -28,7 +28,7 @@ fi
 # Initialize
 init() {
     mkdir -p "$CONFIG_DIR"
-    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat"
+    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat" "$CONFIG_DIR/traffic_locked.dat"
     
     # Ensure nethogs is installed
     which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
@@ -204,7 +204,7 @@ save_traffic() {
     set_baseline "$user" "$raw"
 }
 
-# Reset traffic for user (also resets baseline)
+# Reset traffic for user (also resets baseline and unlocks if locked)
 reset_traffic() {
     local user=$1
     sed -i "/^$user:/d" "$TRAFFIC_FILE"
@@ -213,6 +213,9 @@ reset_traffic() {
     # Set baseline to current raw so we start fresh
     local raw=$(get_proc_io_raw "$user")
     set_baseline "$user" "$raw"
+    
+    # Unlock user if they were locked for traffic
+    unlock_user_if_traffic_locked "$user"
 }
 
 # Get/Set traffic limit
@@ -225,6 +228,44 @@ set_limit() {
     local user=$1 limit=$2
     sed -i "/^$user:/d" "$LIMITS_FILE"
     echo "$user:$limit" >> "$LIMITS_FILE"
+    
+    # If setting a new limit, check if user should be unlocked
+    if [ "$limit" -eq 0 ]; then
+        # Removing limit - unlock if was locked for traffic
+        unlock_user_if_traffic_locked "$user"
+    else
+        # Check if new limit allows user to be unlocked
+        local traffic=$(get_traffic "$user")
+        if [ "$traffic" -lt "$limit" ]; then
+            unlock_user_if_traffic_locked "$user"
+        fi
+    fi
+}
+
+# File to track users locked due to traffic limit
+LOCKED_FILE="$CONFIG_DIR/traffic_locked.dat"
+
+# Lock user account due to traffic limit
+lock_user_for_traffic() {
+    local user=$1
+    usermod -L "$user" 2>/dev/null
+    # Track that this user was locked for traffic reasons
+    grep -q "^$user$" "$LOCKED_FILE" 2>/dev/null || echo "$user" >> "$LOCKED_FILE"
+}
+
+# Unlock user if they were locked due to traffic
+unlock_user_if_traffic_locked() {
+    local user=$1
+    if grep -q "^$user$" "$LOCKED_FILE" 2>/dev/null; then
+        usermod -U "$user" 2>/dev/null
+        sed -i "/^$user$/d" "$LOCKED_FILE"
+    fi
+}
+
+# Check if user is locked for traffic
+is_traffic_locked() {
+    local user=$1
+    grep -q "^$user$" "$LOCKED_FILE" 2>/dev/null
 }
 
 # Check if user is over limit and enforce it
@@ -233,14 +274,21 @@ check_and_enforce_limit() {
     local traffic=$(get_traffic "$user")
     local limit=$(get_limit "$user")
     
-    # If no limit or unlimited, skip
-    [ -z "$limit" ] || [ "$limit" -eq 0 ] && return 0
+    # If no limit or unlimited, ensure user is unlocked (if was traffic-locked)
+    if [ -z "$limit" ] || [ "$limit" -eq 0 ]; then
+        unlock_user_if_traffic_locked "$user"
+        return 0
+    fi
     
-    # If over limit, kill sessions and save traffic
+    # If over limit, lock account and kill sessions
     if [ "$traffic" -ge "$limit" ]; then
         save_traffic "$user"
         kill_user_sessions "$user"
+        lock_user_for_traffic "$user"
         return 1  # Over limit
+    else
+        # Under limit - make sure they're unlocked
+        unlock_user_if_traffic_locked "$user"
     fi
     
     return 0  # OK
@@ -781,14 +829,23 @@ view_traffic() {
             if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
                 limit_str=$(format_bytes "$limit")
                 if [ $traffic -ge $limit ]; then
-                    status="${RED}OVER${NC}"
-                    # ENFORCE: Kill user session if over limit
+                    # ENFORCE: Lock account and kill session if over limit
                     if pgrep -u "$user" sshd >/dev/null 2>&1; then
                         save_traffic "$user"
                         kill_user_sessions "$user"
-                        status="${RED}KICKED${NC}"
-                        up="${RED}disconnected${NC}"
+                        lock_user_for_traffic "$user"
+                        up="${RED}kicked${NC}"
                         down="-"
+                    fi
+                    
+                    # Show locked status
+                    if is_traffic_locked "$user"; then
+                        status="${RED}LOCKED${NC}"
+                        up="${RED}blocked${NC}"
+                    else
+                        lock_user_for_traffic "$user"
+                        status="${RED}LOCKED${NC}"
+                        up="${RED}blocked${NC}"
                     fi
                 else
                     local pct=$((traffic * 100 / limit))
