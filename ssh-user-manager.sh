@@ -798,89 +798,107 @@ view_traffic() {
         local nh_data=$(timeout 2 nethogs -t -c 1 2>/dev/null)
         
         clear
-        echo -e "${BOLD}${CYAN}"
-        echo "  ╔═══════════════════════════════════════════════════════════════════════╗"
-        echo "  ║                    📊 REAL-TIME TRAFFIC MONITOR                       ║"
-        echo "  ╚═══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        printf "  ${BOLD}%-10s │ %-12s │ %-12s │ %-12s │ %-10s │ %-8s${NC}\n" "USER" "↑ UP" "↓ DOWN" "TOTAL" "LIMIT" "STATUS"
-        echo "  ──────────┼──────────────┼──────────────┼──────────────┼────────────┼─────────"
+        echo -e "  ${BOLD}${CYAN}📊 TRAFFIC MONITOR${NC}                              $(date '+%H:%M:%S')"
+        echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
         
         for user in "${users[@]}"; do
             local traffic=$(get_traffic "$user")
             local limit=$(get_limit "$user")
-            local status="${GREEN}OK${NC}"
-            local limit_str="∞"
-            local up="-"
-            local down="-"
+            local status=""
+            local speed_info=""
+            local bar=""
             
-            # Check if online and get speed from cached nethogs data
+            # Check if online and get speed
+            local is_online=false
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
-                local speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
+                is_online=true
+                # Search for user in nethogs output (try different patterns)
+                local speed_line=$(echo "$nh_data" | grep -E "sshd.*$user|$user" | grep -v "^$" | tail -1)
                 
                 if [ -n "$speed_line" ]; then
                     local sent=$(echo "$speed_line" | awk '{printf "%.1f", $(NF-1)}')
                     local recv=$(echo "$speed_line" | awk '{printf "%.1f", $NF}')
-                    up="${sent} KB/s"
-                    down="${recv} KB/s"
+                    speed_info="↑${sent} ↓${recv} KB/s"
                 else
-                    up="${CYAN}idle${NC}"
-                    down="-"
+                    speed_info="↑0.0 ↓0.0 KB/s"
                 fi
-            else
-                up="${YELLOW}offline${NC}"
-                down="-"
             fi
             
+            # Calculate percentage and status
+            local pct=0
+            local limit_str="unlimited"
             if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
+                pct=$((traffic * 100 / limit))
                 limit_str=$(format_bytes "$limit")
+                
                 if [ $traffic -ge $limit ]; then
                     # ENFORCE: Lock account and kill session if over limit
-                    if pgrep -u "$user" sshd >/dev/null 2>&1; then
+                    if $is_online; then
                         save_traffic "$user"
                         kill_user_sessions "$user"
                         lock_user_for_traffic "$user"
-                        up="${RED}kicked${NC}"
-                        down="-"
+                        is_online=false
                     fi
-                    
-                    # Show locked status
-                    if is_traffic_locked "$user"; then
-                        status="${RED}LOCKED${NC}"
-                        up="${RED}blocked${NC}"
-                    else
+                    if ! is_traffic_locked "$user"; then
                         lock_user_for_traffic "$user"
-                        status="${RED}LOCKED${NC}"
-                        up="${RED}blocked${NC}"
                     fi
+                    status="${RED}▌LOCKED${NC}"
+                    speed_info="${RED}blocked${NC}"
+                elif [ $pct -ge 90 ]; then
+                    status="${YELLOW}▌${pct}%${NC}"
                 else
-                    local pct=$((traffic * 100 / limit))
-                    if [ $pct -ge 90 ]; then
-                        status="${YELLOW}${pct}%${NC}"
-                    else
-                        status="${GREEN}${pct}%${NC}"
-                    fi
+                    status="${GREEN}▌${pct}%${NC}"
                 fi
+                
+                # Create progress bar
+                local filled=$((pct / 5))
+                [ $filled -gt 20 ] && filled=20
+                local empty=$((20 - filled))
+                if [ $pct -ge 100 ]; then
+                    bar="${RED}$(printf '█%.0s' $(seq 1 20))${NC}"
+                elif [ $pct -ge 90 ]; then
+                    bar="${YELLOW}$(printf '█%.0s' $(seq 1 $filled))${NC}$(printf '░%.0s' $(seq 1 $empty))"
+                else
+                    bar="${GREEN}$(printf '█%.0s' $(seq 1 $filled))${NC}$(printf '░%.0s' $(seq 1 $empty))"
+                fi
+            else
+                status="${GREEN}▌OK${NC}"
+                bar="$(printf '░%.0s' $(seq 1 20))"
             fi
             
-            printf "  %-10s │ %-18b │ %-18b │ %-12s │ %-10s │ %-8b\n" \
-                "$user" "$up" "$down" "$(format_bytes $traffic)" "$limit_str" "$status"
+            # Online indicator
+            local online_dot=""
+            if $is_online; then
+                online_dot="${GREEN}●${NC}"
+            else
+                online_dot="${YELLOW}○${NC}"
+                speed_info="${YELLOW}offline${NC}"
+            fi
+            
+            # Print user row
+            echo -e "  $online_dot ${BOLD}$user${NC}"
+            echo -e "    Used: $(format_bytes $traffic) / $limit_str  $status"
+            echo -e "    [$bar]"
+            if $is_online || [ "$speed_info" = "${YELLOW}offline${NC}" ]; then
+                echo -e "    $speed_info"
+            fi
+            echo ""
         done
         
-        echo ""
-        echo "  ──────────────────────────────────────────────────────────────────────────"
-        echo -e "  ${CYAN}[R]${NC} Refresh   ${CYAN}[Q]${NC} Back to menu"
+        echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${CYAN}R${NC} Refresh  ${CYAN}Q${NC} Back"
         echo ""
         
-        # Read with timeout for auto-refresh, or wait for keypress
+        # Read with timeout for auto-refresh
         read -t 3 -n 1 -s key
         case "$key" in
             q|Q) 
-                # Save all traffic before leaving
                 for u in "${users[@]}"; do save_traffic "$u"; done
                 break 
                 ;;
-            r|R|'') ;; # Refresh
+            r|R|'') ;;
         esac
     done
 }
