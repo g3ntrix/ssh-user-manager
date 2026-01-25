@@ -35,13 +35,8 @@ init() {
         modprobe xt_owner 2>/dev/null
     fi
     
-    # Setup iptables chain for traffic accounting
-    iptables -N SSH_TRAFFIC 2>/dev/null
-    iptables -C FORWARD -j SSH_TRAFFIC 2>/dev/null || iptables -I FORWARD -j SSH_TRAFFIC 2>/dev/null
-    iptables -C INPUT -j SSH_TRAFFIC 2>/dev/null || iptables -I INPUT -j SSH_TRAFFIC 2>/dev/null
-    iptables -C OUTPUT -j SSH_TRAFFIC 2>/dev/null || iptables -I OUTPUT -j SSH_TRAFFIC 2>/dev/null
-    
     # Setup rules for all existing users
+    # Note: owner match only works in OUTPUT chain
     for user in $(get_users); do
         setup_user_iptables "$user"
     done
@@ -77,11 +72,11 @@ setup_user_iptables() {
     local uid=$(id -u "$user" 2>/dev/null)
     [ -z "$uid" ] && return
     
-    # Remove old rules
-    iptables -D SSH_TRAFFIC -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
+    # Remove old rules from OUTPUT chain
+    while iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "traffic:$user" 2>/dev/null; do :; done
     
-    # Add accounting rule (counts traffic, doesn't block)
-    iptables -A SSH_TRAFFIC -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
+    # Add accounting rule in OUTPUT chain (owner match only works here)
+    iptables -A OUTPUT -m owner --uid-owner "$uid" -m comment --comment "traffic:$user" 2>/dev/null
 }
 
 # Get iptables traffic for user
@@ -90,7 +85,8 @@ get_iptables_traffic() {
     local uid=$(id -u "$user" 2>/dev/null)
     [ -z "$uid" ] && echo "0" && return
     
-    local bytes=$(iptables -L SSH_TRAFFIC -v -n -x 2>/dev/null | grep "owner UID match $uid" | awk '{sum+=$2} END {print sum+0}')
+    # Get bytes from OUTPUT chain with exact count (-x flag)
+    local bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null | grep "traffic:$user" | awk '{print $2}')
     echo "${bytes:-0}"
 }
 
