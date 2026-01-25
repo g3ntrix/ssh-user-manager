@@ -801,7 +801,8 @@ view_traffic() {
     # Loop until user presses q
     while true; do
         # Get nethogs data ONCE for all users (faster)
-        local nh_data=$(timeout 2 nethogs -t -c 1 2>/dev/null)
+        # nethogs -t format: "program/PID/user\tSENT\tRECEIVED"
+        local nh_data=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -v "^Refreshing" | grep -v "^$")
         
         clear
         echo ""
@@ -820,18 +821,19 @@ view_traffic() {
             local is_online=false
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
                 is_online=true
-                # Search for user in nethogs output - nethogs shows "program/PID/user"
-                # Try multiple patterns: exact user match, sshd-session with user
-                local speed_line=$(echo "$nh_data" | grep -E "/$user\s|$user\s" | tail -1)
+                # Search for user in nethogs output
+                # Format varies: "sshd-session: user" or "/sshd/PID/user" or just "user"
+                local speed_line=$(echo "$nh_data" | grep -i "$user" | head -1)
                 
                 if [ -n "$speed_line" ]; then
-                    local sent=$(echo "$speed_line" | awk '{printf "%.1f", $(NF-1)}')
-                    local recv=$(echo "$speed_line" | awk '{printf "%.1f", $NF}')
-                    speed_info="↑${sent} ↓${recv} KB/s"
-                else
-                    # No nethogs data but user is online
-                    speed_info="↑- ↓- KB/s"
+                    # Extract last two numbers (sent and received)
+                    local sent=$(echo "$speed_line" | awk '{print $(NF-1)}' | sed 's/[^0-9.]//g')
+                    local recv=$(echo "$speed_line" | awk '{print $NF}' | sed 's/[^0-9.]//g')
+                    [ -n "$sent" ] && [ -n "$recv" ] && speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
                 fi
+                
+                # Fallback if no speed data
+                [ -z "$speed_info" ] && speed_info="${CYAN}active${NC}"
             fi
             
             # Calculate percentage and status
