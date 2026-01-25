@@ -9,6 +9,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# System users to exclude from management (add usernames separated by |)
+EXCLUDED_USERS="nobody|linuxuser"
+
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then 
     echo -e "${RED}Error: This script must be run as root or with sudo${NC}"
@@ -63,24 +66,17 @@ create_user() {
     useradd -m -s /bin/bash "$username"
     
     if [ $? -eq 0 ]; then
-        # Set password using echo piped to passwd (bypasses some PAM checks)
-        echo -e "$password\n$password" | passwd "$username" >/dev/null 2>&1
+        # Generate password hash using openssl and set directly (bypasses PAM)
+        password_hash=$(openssl passwd -6 "$password")
+        usermod -p "$password_hash" "$username"
         
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}User '$username' created successfully with password${NC}"
             echo -e "${YELLOW}User can now connect via SSH${NC}"
         else
-            echo -e "${RED}User created but failed to set password${NC}"
-            echo -e "${YELLOW}Attempting alternative method...${NC}"
-            # Try chpasswd as fallback
-            echo "$username:$password" | chpasswd 2>/dev/null
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}Password set successfully using alternative method${NC}"
-            else
-                # Clean up the user if password setting failed
-                userdel -r "$username" 2>/dev/null
-                echo -e "${RED}Failed to set password. User removed.${NC}"
-            fi
+            # Clean up the user if password setting failed
+            userdel -r "$username" 2>/dev/null
+            echo -e "${RED}Failed to set password. User removed.${NC}"
         fi
     else
         echo -e "${RED}Failed to create user${NC}"
@@ -93,8 +89,8 @@ create_user() {
 delete_user() {
     echo -e "\n${RED}=== Delete User ===${NC}"
     
-    # Get list of regular users (UID >= 1000, exclude nobody)
-    mapfile -t users < <(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
+    # Get list of regular users (UID >= 1000, exclude system users)
+    mapfile -t users < <(awk -F: -v excluded="$EXCLUDED_USERS" '$3 >= 1000 && $3 < 65534 && $1 !~ excluded {print $1}' /etc/passwd)
     
     if [ ${#users[@]} -eq 0 ]; then
         echo -e "${YELLOW}No regular users found${NC}"
@@ -162,12 +158,12 @@ delete_user() {
 
 # Function to list users
 list_users() {
-    echo -e "\n${GREEN}=== System Users (UID >= 1000) ===${NC}"
+    echo -e "\n${GREEN}=== SSH Users ===${NC}"
     echo "Username          UID    Home Directory"
     echo "----------------------------------------"
     
-    # List users with UID >= 1000 (regular users, not system users)
-    awk -F: '$3 >= 1000 {printf "%-15s   %-6s %s\n", $1, $3, $6}' /etc/passwd
+    # List users with UID >= 1000, exclude system users like nobody and linuxuser
+    awk -F: -v excluded="$EXCLUDED_USERS" '$3 >= 1000 && $3 < 65534 && $1 !~ excluded {printf "%-15s   %-6s %s\n", $1, $3, $6}' /etc/passwd
     
     echo ""
     read -p "Press Enter to continue..."
@@ -177,8 +173,8 @@ list_users() {
 change_password() {
     echo -e "\n${YELLOW}=== Change User Password ===${NC}"
     
-    # Get list of regular users
-    mapfile -t users < <(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
+    # Get list of regular users (exclude system users)
+    mapfile -t users < <(awk -F: -v excluded="$EXCLUDED_USERS" '$3 >= 1000 && $3 < 65534 && $1 !~ excluded {print $1}' /etc/passwd)
     
     if [ ${#users[@]} -eq 0 ]; then
         echo -e "${YELLOW}No regular users found${NC}"
@@ -228,19 +224,14 @@ change_password() {
         return
     fi
     
-    # Set password using echo piped to passwd
-    echo -e "$password\n$password" | passwd "$username" >/dev/null 2>&1
+    # Set password using openssl hash (bypasses PAM)
+    password_hash=$(openssl passwd -6 "$password")
+    usermod -p "$password_hash" "$username"
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Password changed successfully for '$username'${NC}"
     else
-        echo -e "${YELLOW}Attempting alternative method...${NC}"
-        echo "$username:$password" | chpasswd 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}Password changed successfully${NC}"
-        else
-            echo -e "${RED}Failed to change password${NC}"
-        fi
+        echo -e "${RED}Failed to change password${NC}"
     fi
     
     read -p "Press Enter to continue..."
