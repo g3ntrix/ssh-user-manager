@@ -75,12 +75,14 @@ setup_user_iptables() {
 # File to store baseline /proc/io values (what we've already counted)
 BASELINE_FILE="$CONFIG_DIR/baseline.dat"
 
-# Get current /proc/io total for user's sshd processes
+# Get current /proc/io total for user's SSH session processes
+# Looks for sshd, sshd-session, bash, sh processes owned by user
 get_proc_io_raw() {
     local user=$1
     local total=0
     
-    local pids=$(pgrep -u "$user" sshd 2>/dev/null)
+    # Get all PIDs for user's session processes
+    local pids=$(pgrep -u "$user" 'sshd|sshd-session|bash|sh' 2>/dev/null)
     [ -z "$pids" ] && echo "0" && return
     
     for pid in $pids; do
@@ -818,8 +820,9 @@ view_traffic() {
             local bar=""
             
             # Check if online and get speed
+            # Use multiple methods: pgrep for sshd, or 'who' command for SSH sessions
             local is_online=false
-            if pgrep -u "$user" sshd >/dev/null 2>&1; then
+            if pgrep -u "$user" sshd >/dev/null 2>&1 || who | grep -q "^$user "; then
                 is_online=true
                 # Search for "sshd-session: USERNAME/" pattern
                 local speed_line=$(echo "$nh_data" | grep "sshd-session: $user/" | tail -1)
