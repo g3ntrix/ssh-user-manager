@@ -800,9 +800,9 @@ view_traffic() {
     
     # Loop until user presses q
     while true; do
-        # Get nethogs data ONCE for all users (faster)
-        # nethogs -t format: "program/PID/user\tSENT\tRECEIVED"
-        local nh_data=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -v "^Refreshing" | grep -v "^$")
+        # Get nethogs data - need at least 2 cycles to get real data
+        # Format with -t: "program/PID/user\tSENT\tRECEIVED"
+        local nh_data=$(timeout 3 nethogs -t -c 2 2>/dev/null | tail -20)
         
         clear
         echo ""
@@ -821,19 +821,20 @@ view_traffic() {
             local is_online=false
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
                 is_online=true
-                # Search for user in nethogs output
-                # Format varies: "sshd-session: user" or "/sshd/PID/user" or just "user"
-                local speed_line=$(echo "$nh_data" | grep -i "$user" | head -1)
+                # Search for user in nethogs output (case insensitive)
+                local speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
                 
                 if [ -n "$speed_line" ]; then
-                    # Extract last two numbers (sent and received)
-                    local sent=$(echo "$speed_line" | awk '{print $(NF-1)}' | sed 's/[^0-9.]//g')
-                    local recv=$(echo "$speed_line" | awk '{print $NF}' | sed 's/[^0-9.]//g')
-                    [ -n "$sent" ] && [ -n "$recv" ] && speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
+                    # Extract the two numbers at the end (sent and received KB/s)
+                    local sent=$(echo "$speed_line" | awk '{print $(NF-1)}')
+                    local recv=$(echo "$speed_line" | awk '{print $NF}')
+                    # Clean up and format
+                    sent=$(printf "%.1f" "${sent:-0}" 2>/dev/null || echo "0.0")
+                    recv=$(printf "%.1f" "${recv:-0}" 2>/dev/null || echo "0.0")
+                    speed_info="↑${sent} ↓${recv} KB/s"
+                else
+                    speed_info="${CYAN}active${NC}"
                 fi
-                
-                # Fallback if no speed data
-                [ -z "$speed_info" ] && speed_info="${CYAN}active${NC}"
             fi
             
             # Calculate percentage and status
