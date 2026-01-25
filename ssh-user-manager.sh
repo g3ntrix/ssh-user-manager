@@ -69,30 +69,72 @@ days_to_date() {
 # Setup traffic tracking for a user
 setup_user_iptables() {
     local user=$1
-    # Just ensure user tracking file exists
+    # Ensure conntrack is available
+    which conntrack >/dev/null 2>&1 || apt-get install -y conntrack >/dev/null 2>&1
     touch "$CONFIG_DIR/session_$user.dat" 2>/dev/null
 }
 
-# Get live session traffic for user using /proc/[pid]/io
-# This reads actual I/O bytes from sshd processes running as the user
+# Get live session traffic using multiple methods
 get_session_traffic() {
     local user=$1
     local total=0
     
-    # Find all sshd processes for this user
+    # Method 1: Try /proc/[pid]/io for sshd processes
     local pids=$(pgrep -u "$user" sshd 2>/dev/null)
-    [ -z "$pids" ] && echo "0" && return
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            if [ -f "/proc/$pid/io" ]; then
+                local rbytes=$(awk '/^read_bytes:/{print $2}' /proc/$pid/io 2>/dev/null)
+                local wbytes=$(awk '/^write_bytes:/{print $2}' /proc/$pid/io 2>/dev/null)
+                total=$((total + ${rbytes:-0} + ${wbytes:-0}))
+            fi
+        done
+    fi
     
-    for pid in $pids; do
+    # Method 2: If /proc/io gave 0, try conntrack
+    if [ "$total" -eq 0 ] && which conntrack >/dev/null 2>&1; then
+        # Get all SSH connections and sum bytes
+        # conntrack output has bytes= field
+        local conn_bytes=$(conntrack -L -p tcp --dport 22 2>/dev/null | \
+            awk -F'bytes=' '{for(i=2;i<=NF;i++){split($i,a," ");sum+=a[1]}} END{print sum+0}')
+        total=${conn_bytes:-0}
+    fi
+    
+    # Method 3: If still 0, try reading from /proc/net/dev differences
+    # (This would need baseline tracking, skip for now)
+    
+    echo "$total"
+}
+
+# Debug function - call from menu to see what's happening
+debug_traffic() {
+    local user=$1
+    echo -e "\n${CYAN}=== Traffic Debug for $user ===${NC}"
+    
+    echo -e "\n${YELLOW}1. SSHD processes for user:${NC}"
+    pgrep -u "$user" sshd 2>/dev/null | while read pid; do
+        echo "  PID: $pid"
         if [ -f "/proc/$pid/io" ]; then
-            # read_bytes + write_bytes from /proc/[pid]/io
-            local rbytes=$(grep "^read_bytes:" /proc/$pid/io 2>/dev/null | awk '{print $2}')
-            local wbytes=$(grep "^write_bytes:" /proc/$pid/io 2>/dev/null | awk '{print $2}')
-            total=$((total + ${rbytes:-0} + ${wbytes:-0}))
+            echo "  /proc/$pid/io:"
+            cat /proc/$pid/io 2>/dev/null | sed 's/^/    /'
         fi
     done
     
-    echo "$total"
+    echo -e "\n${YELLOW}2. All processes for user:${NC}"
+    ps -u "$user" -o pid,comm,rss 2>/dev/null | head -10
+    
+    echo -e "\n${YELLOW}3. Conntrack SSH connections:${NC}"
+    conntrack -L -p tcp --dport 22 2>/dev/null | head -5
+    
+    echo -e "\n${YELLOW}4. SS socket stats:${NC}"
+    ss -tnp 2>/dev/null | grep -E "ssh|:22" | head -5
+    
+    echo -e "\n${YELLOW}5. Current traffic calculation:${NC}"
+    local traffic=$(get_session_traffic "$user")
+    echo "  Raw bytes: $traffic"
+    echo "  Formatted: $(format_bytes $traffic)"
+    
+    read -p "Press Enter to continue..."
 }
 
 # Get total traffic (saved + current session)
@@ -602,6 +644,7 @@ main_menu() {
         echo ""
         echo -e "  ${BOLD}TRAFFIC${NC}"
         echo -e "    ${CYAN}7${NC}. View traffic       ${CYAN}8${NC}. Manage limits"
+        echo -e "    ${CYAN}9${NC}. Debug traffic"
         echo ""
         line
         echo -e "    ${CYAN}0${NC}. Exit"
@@ -618,6 +661,12 @@ main_menu() {
             6) manage_expiry ;;
             7) view_traffic ;;
             8) manage_traffic ;;
+            9) 
+                header
+                echo "Select user to debug:"
+                select_user
+                [ -n "$SELECTED_USER" ] && debug_traffic "$SELECTED_USER"
+                ;;
             0)
                 # Save traffic before exit
                 for u in $(get_users); do save_traffic "$u"; done
