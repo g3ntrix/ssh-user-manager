@@ -33,9 +33,11 @@ init() {
     # Ensure nethogs is installed
     which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
     
-    # Setup rules for all existing users
+    # Setup rules for all existing users and enforce limits
     for user in $(get_users); do
         setup_user_iptables "$user"
+        # Kick users who are over their limit
+        check_and_enforce_limit "$user"
     done
 }
 
@@ -223,6 +225,25 @@ set_limit() {
     local user=$1 limit=$2
     sed -i "/^$user:/d" "$LIMITS_FILE"
     echo "$user:$limit" >> "$LIMITS_FILE"
+}
+
+# Check if user is over limit and enforce it
+check_and_enforce_limit() {
+    local user=$1
+    local traffic=$(get_traffic "$user")
+    local limit=$(get_limit "$user")
+    
+    # If no limit or unlimited, skip
+    [ -z "$limit" ] || [ "$limit" -eq 0 ] && return 0
+    
+    # If over limit, kill sessions and save traffic
+    if [ "$traffic" -ge "$limit" ]; then
+        save_traffic "$user"
+        kill_user_sessions "$user"
+        return 1  # Over limit
+    fi
+    
+    return 0  # OK
 }
 
 # Get expiry date
@@ -761,6 +782,14 @@ view_traffic() {
                 limit_str=$(format_bytes "$limit")
                 if [ $traffic -ge $limit ]; then
                     status="${RED}OVER${NC}"
+                    # ENFORCE: Kill user session if over limit
+                    if pgrep -u "$user" sshd >/dev/null 2>&1; then
+                        save_traffic "$user"
+                        kill_user_sessions "$user"
+                        status="${RED}KICKED${NC}"
+                        up="${RED}disconnected${NC}"
+                        down="-"
+                    fi
                 else
                     local pct=$((traffic * 100 / limit))
                     if [ $pct -ge 90 ]; then
