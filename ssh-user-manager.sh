@@ -28,7 +28,7 @@ fi
 # Initialize
 init() {
     mkdir -p "$CONFIG_DIR"
-    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat"
+    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat"
     
     # Ensure nethogs is installed
     which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
@@ -68,18 +68,13 @@ setup_user_iptables() {
     local user=$1
     # Ensure nethogs is available
     which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
-    
-    # Create session tracking file
-    local session_file="$CONFIG_DIR/session_$user.dat"
-    touch "$session_file" 2>/dev/null
 }
 
-# Store last known /proc/pid/io values for delta calculation
-PROC_IO_BASELINE="$CONFIG_DIR/proc_io_baseline.dat"
+# File to store baseline /proc/io values (what we've already counted)
+BASELINE_FILE="$CONFIG_DIR/baseline.dat"
 
-# Get accumulated bytes from /proc/[pid]/io
-# This method reads actual disk I/O which includes network for SSH tunnels
-get_proc_io_traffic() {
+# Get current /proc/io total for user's sshd processes
+get_proc_io_raw() {
     local user=$1
     local total=0
     
@@ -88,8 +83,6 @@ get_proc_io_traffic() {
     
     for pid in $pids; do
         if [ -f "/proc/$pid/io" ]; then
-            # rchar = characters read (includes network data received)
-            # wchar = characters written (includes network data sent)
             local rchar=$(awk '/^rchar:/{print $2}' /proc/$pid/io 2>/dev/null)
             local wchar=$(awk '/^wchar:/{print $2}' /proc/$pid/io 2>/dev/null)
             total=$((total + ${rchar:-0} + ${wchar:-0}))
@@ -99,14 +92,38 @@ get_proc_io_traffic() {
     echo "$total"
 }
 
-# Get session traffic - primary method
-get_session_traffic() {
+# Get baseline (already counted traffic) for user
+get_baseline() {
     local user=$1
-    get_proc_io_traffic "$user"
+    grep "^$user:" "$BASELINE_FILE" 2>/dev/null | cut -d: -f2
 }
 
-# Get accumulated traffic from nethogs (runs briefly to sample)
-# This is for real-time display
+# Set baseline for user
+set_baseline() {
+    local user=$1
+    local value=$2
+    sed -i "/^$user:/d" "$BASELINE_FILE" 2>/dev/null
+    echo "$user:$value" >> "$BASELINE_FILE"
+}
+
+# Get session traffic = current /proc/io - baseline (what's new since last save)
+get_session_traffic() {
+    local user=$1
+    local raw=$(get_proc_io_raw "$user")
+    local baseline=$(get_baseline "$user")
+    
+    # If no active session, return 0
+    [ "$raw" -eq 0 ] && echo "0" && return
+    
+    # If baseline is higher than raw, session restarted - use raw as new traffic
+    if [ "${baseline:-0}" -gt "$raw" ]; then
+        echo "$raw"
+    else
+        echo $((raw - ${baseline:-0}))
+    fi
+}
+
+# Get accumulated traffic from nethogs (for real-time speed display)
 get_realtime_traffic() {
     local user=$1
     
@@ -160,30 +177,40 @@ debug_traffic() {
     read -p "Press Enter to continue..."
 }
 
-# Get total traffic (saved + current session)
+# Get total traffic (saved + unsaved session traffic)
 get_traffic() {
     local user=$1
     local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
-    local current=$(get_session_traffic "$user")
-    echo $((${saved:-0} + ${current:-0}))
+    local session=$(get_session_traffic "$user")
+    echo $((${saved:-0} + ${session:-0}))
 }
 
-# Save traffic counter (accumulates session data)
+# Save traffic: add session traffic to saved total and update baseline
 save_traffic() {
     local user=$1
-    local current=$(get_session_traffic "$user")
+    local session=$(get_session_traffic "$user")
     local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
-    local total=$((${saved:-0} + ${current:-0}))
+    local raw=$(get_proc_io_raw "$user")
+    
+    # Add session traffic to saved total
+    local new_total=$((${saved:-0} + ${session:-0}))
     
     sed -i "/^$user:/d" "$TRAFFIC_FILE"
-    echo "$user:$total" >> "$TRAFFIC_FILE"
+    echo "$user:$new_total" >> "$TRAFFIC_FILE"
+    
+    # Update baseline to current raw value so we don't double-count
+    set_baseline "$user" "$raw"
 }
 
-# Reset traffic for user
+# Reset traffic for user (also resets baseline)
 reset_traffic() {
     local user=$1
     sed -i "/^$user:/d" "$TRAFFIC_FILE"
     echo "$user:0" >> "$TRAFFIC_FILE"
+    
+    # Set baseline to current raw so we start fresh
+    local raw=$(get_proc_io_raw "$user")
+    set_baseline "$user" "$raw"
 }
 
 # Get/Set traffic limit
