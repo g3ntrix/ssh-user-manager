@@ -1,847 +1,639 @@
 #!/bin/bash
 
-# SSH User Manager with Traffic & Expiration Management
-# Requires root privileges to run
+# SSH User Manager v3.0
+# Complete user management with traffic tracking for SSH VPN
+# Requires: iptables, xt_owner module (usually included in kernel)
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Configuration directory
+# Config
 CONFIG_DIR="/etc/ssh-user-manager"
-TRAFFIC_FILE="$CONFIG_DIR/traffic_limits.conf"
-TRAFFIC_LOG="$CONFIG_DIR/traffic_usage.dat"
-
-# System users to exclude from management (add usernames separated by |)
+TRAFFIC_FILE="$CONFIG_DIR/traffic_usage.dat"
+LIMITS_FILE="$CONFIG_DIR/traffic_limits.dat"
 EXCLUDED_USERS="nobody|linuxuser"
 
-# Check if running as root
+# Check root
 if [ "$EUID" -ne 0 ]; then 
-    echo -e "${RED}Error: This script must be run as root or with sudo${NC}"
+    echo -e "${RED}Run as root: sudo $0${NC}"
     exit 1
 fi
 
-# Initialize configuration directory and files
-init_config() {
-    if [ ! -d "$CONFIG_DIR" ]; then
-        mkdir -p "$CONFIG_DIR"
-    fi
-    if [ ! -f "$TRAFFIC_FILE" ]; then
-        touch "$TRAFFIC_FILE"
-    fi
-    if [ ! -f "$TRAFFIC_LOG" ]; then
-        touch "$TRAFFIC_LOG"
+# Initialize
+init() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$TRAFFIC_FILE" "$LIMITS_FILE"
+    
+    # Check if xt_owner module is available
+    if ! lsmod | grep -q "xt_owner"; then
+        modprobe xt_owner 2>/dev/null
     fi
     
-    # Setup traffic rules for all existing users
-    setup_all_traffic_rules
+    # Setup iptables chain for traffic accounting
+    iptables -N SSH_TRAFFIC 2>/dev/null
+    iptables -C FORWARD -j SSH_TRAFFIC 2>/dev/null || iptables -I FORWARD -j SSH_TRAFFIC 2>/dev/null
+    iptables -C INPUT -j SSH_TRAFFIC 2>/dev/null || iptables -I INPUT -j SSH_TRAFFIC 2>/dev/null
+    iptables -C OUTPUT -j SSH_TRAFFIC 2>/dev/null || iptables -I OUTPUT -j SSH_TRAFFIC 2>/dev/null
+    
+    # Setup rules for all existing users
+    for user in $(get_users); do
+        setup_user_iptables "$user"
+    done
 }
 
-# Initialize on script start
-init_config
-
-# Function to get user list
+# Get managed users
 get_users() {
-    awk -F: -v excluded="$EXCLUDED_USERS" '$3 >= 1000 && $3 < 65534 && $1 !~ excluded {print $1}' /etc/passwd
+    awk -F: -v ex="$EXCLUDED_USERS" '$3 >= 1000 && $3 < 65534 && $1 !~ ex {print $1}' /etc/passwd
 }
 
-# Function to display main menu
-show_menu() {
-    clear
-    echo "========================================"
-    echo "    SSH User Manager v2.0"
-    echo "========================================"
-    echo "1. Create new user"
-    echo "2. Delete user"
-    echo "3. List all users"
-    echo "4. Show online users"
-    echo "5. Change user password"
-    echo "6. Manage user expiration"
-    echo "7. Manage traffic limits"
-    echo "8. View traffic usage"
-    echo "9. Exit"
-    echo "========================================"
+# Format bytes
+format_bytes() {
+    local b=$1
+    if [ "$b" -ge 1073741824 ]; then
+        printf "%.2f GB" "$(awk "BEGIN {printf \"%.2f\", $b/1073741824}")"
+    elif [ "$b" -ge 1048576 ]; then
+        printf "%.2f MB" "$(awk "BEGIN {printf \"%.2f\", $b/1048576}")"
+    elif [ "$b" -ge 1024 ]; then
+        printf "%.2f KB" "$(awk "BEGIN {printf \"%.2f\", $b/1024}")"
+    else
+        echo "$b B"
+    fi
 }
 
-# Function to convert days to date
+# Days to date
 days_to_date() {
-    local days=$1
-    date -d "+$days days" +%Y-%m-%d
+    date -d "+$1 days" +%Y-%m-%d
 }
 
-# Function to create user
+# Setup iptables rules for a user
+setup_user_iptables() {
+    local user=$1
+    local uid=$(id -u "$user" 2>/dev/null)
+    [ -z "$uid" ] && return
+    
+    # Remove old rules
+    iptables -D SSH_TRAFFIC -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
+    
+    # Add accounting rule (counts traffic, doesn't block)
+    iptables -A SSH_TRAFFIC -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
+}
+
+# Get iptables traffic for user
+get_iptables_traffic() {
+    local user=$1
+    local uid=$(id -u "$user" 2>/dev/null)
+    [ -z "$uid" ] && echo "0" && return
+    
+    local bytes=$(iptables -L SSH_TRAFFIC -v -n -x 2>/dev/null | grep "owner UID match $uid" | awk '{sum+=$2} END {print sum+0}')
+    echo "${bytes:-0}"
+}
+
+# Get total traffic (saved + current)
+get_traffic() {
+    local user=$1
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+    local current=$(get_iptables_traffic "$user")
+    echo $((${saved:-0} + ${current:-0}))
+}
+
+# Save and reset traffic counter
+save_traffic() {
+    local user=$1
+    local current=$(get_iptables_traffic "$user")
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+    local total=$((${saved:-0} + ${current:-0}))
+    
+    sed -i "/^$user:/d" "$TRAFFIC_FILE"
+    echo "$user:$total" >> "$TRAFFIC_FILE"
+    
+    # Reset iptables counter
+    local uid=$(id -u "$user" 2>/dev/null)
+    [ -n "$uid" ] && iptables -Z SSH_TRAFFIC 2>/dev/null
+}
+
+# Reset traffic for user
+reset_traffic() {
+    local user=$1
+    sed -i "/^$user:/d" "$TRAFFIC_FILE"
+    echo "$user:0" >> "$TRAFFIC_FILE"
+    
+    local uid=$(id -u "$user" 2>/dev/null)
+    [ -n "$uid" ] && iptables -Z SSH_TRAFFIC 2>/dev/null
+}
+
+# Get/Set traffic limit
+get_limit() {
+    local user=$1
+    grep "^$user:" "$LIMITS_FILE" 2>/dev/null | cut -d: -f2
+}
+
+set_limit() {
+    local user=$1 limit=$2
+    sed -i "/^$user:/d" "$LIMITS_FILE"
+    echo "$user:$limit" >> "$LIMITS_FILE"
+}
+
+# Get expiry date
+get_expiry() {
+    local exp=$(chage -l "$1" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+    [ "$exp" = "never" ] || [ -z "$exp" ] && echo "Never" || echo "$exp"
+}
+
+# Check if expired
+is_expired() {
+    local exp=$(get_expiry "$1")
+    [ "$exp" = "Never" ] && return 1
+    local exp_ts=$(date -d "$exp" +%s 2>/dev/null)
+    [ -n "$exp_ts" ] && [ $(date +%s) -gt $exp_ts ] && return 0
+    return 1
+}
+
+# Kill user sessions
+kill_user_sessions() {
+    local user=$1
+    pkill -KILL -u "$user" 2>/dev/null
+    # Kill SSH sessions
+    for pid in $(ps aux | grep "sshd:.*$user" | grep -v grep | awk '{print $2}'); do
+        kill -9 "$pid" 2>/dev/null
+    done
+}
+
+# Print header
+header() {
+    clear
+    echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}${BOLD}       SSH User Manager v3.0            ${NC}${BLUE}║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+# Print line
+line() {
+    echo -e "${BLUE}──────────────────────────────────────────────${NC}"
+}
+
+# Wait for key
+pause() {
+    echo ""
+    read -p "Press Enter to continue..."
+}
+
+# User selection menu
+select_user() {
+    local prompt=${1:-"Select user"}
+    local users=($(get_users))
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No users found${NC}"
+        return 1
+    fi
+    
+    echo -e "${CYAN}$prompt:${NC}"
+    echo ""
+    for i in "${!users[@]}"; do
+        local u=${users[$i]}
+        local status="${GREEN}●${NC}"
+        is_expired "$u" && status="${RED}●${NC}"
+        echo -e "  ${BOLD}$((i+1))${NC}. $u $status"
+    done
+    echo ""
+    echo -e "  ${BOLD}0${NC}. Cancel"
+    echo ""
+    
+    read -p "Choice: " sel
+    [ "$sel" = "0" ] && return 1
+    
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#users[@]} ]; then
+        SELECTED_USER="${users[$((sel-1))]}"
+        return 0
+    fi
+    
+    echo -e "${RED}Invalid selection${NC}"
+    return 1
+}
+
+#═══════════════════════════════════════════════════════════════════
+# USER MANAGEMENT
+#═══════════════════════════════════════════════════════════════════
+
 create_user() {
-    echo -e "\n${GREEN}=== Create New User ===${NC}"
-    read -p "Enter username: " username
+    header
+    echo -e "${GREEN}➕ Create New User${NC}"
+    line
+    echo ""
     
-    # Check if user already exists
+    read -p "Username: " username
+    [ -z "$username" ] && echo -e "${RED}Username required${NC}" && pause && return
+    
     if id "$username" &>/dev/null; then
-        echo -e "${RED}Error: User '$username' already exists${NC}"
-        read -p "Press Enter to continue..."
+        echo -e "${RED}User already exists${NC}"
+        pause
         return
     fi
     
-    # Get password
-    read -sp "Enter password for '$username': " password
+    read -sp "Password: " pass
     echo ""
-    read -sp "Confirm password: " password_confirm
+    read -sp "Confirm: " pass2
     echo ""
     
-    if [ "$password" != "$password_confirm" ]; then
-        echo -e "${RED}Error: Passwords do not match${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
+    [ "$pass" != "$pass2" ] && echo -e "${RED}Passwords don't match${NC}" && pause && return
+    [ -z "$pass" ] && echo -e "${RED}Password required${NC}" && pause && return
     
-    if [ -z "$password" ]; then
-        echo -e "${RED}Error: Password cannot be empty${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    # Get expiration
     echo ""
-    echo "Set account expiration:"
-    echo "1. 7 days"
-    echo "2. 30 days"
-    echo "3. 90 days"
-    echo "4. 365 days"
-    echo "5. Custom days"
-    echo "6. No expiration"
-    read -p "Select option [1-6]: " exp_choice
+    echo -e "${CYAN}Expiration:${NC}"
+    echo "  1. 7 days      4. 365 days"
+    echo "  2. 30 days     5. Custom"
+    echo "  3. 90 days     6. Never"
+    read -p "Choice [2]: " exp_choice
     
-    case $exp_choice in
+    case ${exp_choice:-2} in
         1) exp_days=7 ;;
         2) exp_days=30 ;;
         3) exp_days=90 ;;
         4) exp_days=365 ;;
-        5) 
-            read -p "Enter number of days: " exp_days
-            if ! [[ "$exp_days" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Invalid number${NC}"
-                read -p "Press Enter to continue..."
-                return
-            fi
-            ;;
+        5) read -p "Days: " exp_days ;;
         6) exp_days=0 ;;
         *) exp_days=30 ;;
     esac
     
-    # Get traffic limit
     echo ""
-    echo "Set traffic limit (download + upload):"
-    echo "1. 1 GB"
-    echo "2. 5 GB"
-    echo "3. 10 GB"
-    echo "4. 50 GB"
-    echo "5. 100 GB"
-    echo "6. Custom GB"
-    echo "7. Unlimited"
-    read -p "Select option [1-7]: " traffic_choice
+    echo -e "${CYAN}Traffic Limit:${NC}"
+    echo "  1. 5 GB        4. 100 GB"
+    echo "  2. 10 GB       5. Custom"
+    echo "  3. 50 GB       6. Unlimited"
+    read -p "Choice [6]: " lim_choice
     
-    case $traffic_choice in
-        1) traffic_limit=1 ;;
-        2) traffic_limit=5 ;;
-        3) traffic_limit=10 ;;
-        4) traffic_limit=50 ;;
-        5) traffic_limit=100 ;;
-        6) 
-            read -p "Enter limit in GB: " traffic_limit
-            if ! [[ "$traffic_limit" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Invalid number${NC}"
-                read -p "Press Enter to continue..."
-                return
-            fi
-            ;;
-        7) traffic_limit=0 ;;
-        *) traffic_limit=0 ;;
+    case ${lim_choice:-6} in
+        1) limit=$((5 * 1073741824)) ;;
+        2) limit=$((10 * 1073741824)) ;;
+        3) limit=$((50 * 1073741824)) ;;
+        4) limit=$((100 * 1073741824)) ;;
+        5) read -p "Limit in GB: " gb; limit=$((gb * 1073741824)) ;;
+        6) limit=0 ;;
+        *) limit=0 ;;
     esac
     
-    # Create user with home directory
-    useradd -m -s /bin/bash "$username"
+    echo ""
+    echo -e "${YELLOW}Creating user...${NC}"
     
-    if [ $? -eq 0 ]; then
-        # Generate password hash using openssl and set directly (bypasses PAM)
-        password_hash=$(openssl passwd -6 "$password")
-        usermod -p "$password_hash" "$username"
-        
-        if [ $? -eq 0 ]; then
-            # Set expiration if specified
-            if [ "$exp_days" -gt 0 ]; then
-                exp_date=$(days_to_date $exp_days)
-                chage -E "$exp_date" "$username"
-                echo -e "${GREEN}User '$username' created. Expires: $exp_date${NC}"
-            else
-                echo -e "${GREEN}User '$username' created with no expiration${NC}"
-            fi
-            
-            # Save traffic limit
-            if [ "$traffic_limit" -gt 0 ]; then
-                # Remove old entry if exists
-                sed -i "/^$username:/d" "$TRAFFIC_FILE" 2>/dev/null
-                # Add new entry (limit in bytes)
-                traffic_bytes=$((traffic_limit * 1073741824))
-                echo "$username:$traffic_bytes:0" >> "$TRAFFIC_FILE"
-                echo -e "${GREEN}Traffic limit set: ${traffic_limit} GB${NC}"
-            else
-                sed -i "/^$username:/d" "$TRAFFIC_FILE" 2>/dev/null
-                echo "$username:0:0" >> "$TRAFFIC_FILE"
-                echo -e "${GREEN}Traffic: Unlimited${NC}"
-            fi
-            
-            # Setup iptables accounting for user
-            setup_traffic_accounting "$username"
-            
-            echo -e "${YELLOW}User can now connect via SSH${NC}"
-        else
-            userdel -r "$username" 2>/dev/null
-            echo -e "${RED}Failed to set password. User removed.${NC}"
-        fi
-    else
+    # Create user
+    useradd -m -s /bin/bash "$username" 2>/dev/null
+    if [ $? -ne 0 ]; then
         echo -e "${RED}Failed to create user${NC}"
-    fi
-    
-    read -p "Press Enter to continue..."
-}
-
-# Function to setup iptables traffic accounting for a user
-setup_traffic_accounting() {
-    local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
-    
-    if [ -z "$uid" ]; then
+        pause
         return
     fi
     
-    # Remove existing rules for this user (both OUTPUT and INPUT proxy)
-    while iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "user_traffic_$username" 2>/dev/null; do :; done
-    
-    # Add OUTPUT rule to track traffic from user's processes (includes SSH tunnel traffic)
-    iptables -A OUTPUT -m owner --uid-owner "$uid" -m comment --comment "user_traffic_$username"
-    
-    # Initialize traffic log entry if not exists
-    if ! grep -q "^$username:" "$TRAFFIC_LOG" 2>/dev/null; then
-        echo "$username:0" >> "$TRAFFIC_LOG"
-    fi
-}
-
-# Function to get current iptables bytes for user
-get_iptables_bytes() {
-    local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
-    
-    if [ -z "$uid" ]; then
-        echo "0"
-        return
+    # Set password
+    echo "$username:$pass" | chpasswd 2>/dev/null
+    if [ $? -ne 0 ]; then
+        # Fallback to openssl
+        local hash=$(openssl passwd -6 "$pass")
+        usermod -p "$hash" "$username"
     fi
     
-    # Get bytes from OUTPUT rule for this user (use -x for exact bytes, not abbreviated)
-    local bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null | grep "user_traffic_$username" | awk '{print $2}')
-    echo "${bytes:-0}"
-}
-
-# Function to save current traffic and reset counters
-save_traffic() {
-    local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
-    
-    if [ -z "$uid" ]; then
-        return
+    # Set expiry
+    if [ "$exp_days" -gt 0 ]; then
+        chage -E "$(days_to_date $exp_days)" "$username"
     fi
     
-    # Get current bytes from iptables
-    local current_bytes=$(get_iptables_bytes "$username")
+    # Set traffic limit
+    set_limit "$username" "$limit"
     
-    # Get saved bytes
-    local saved_bytes=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
-    saved_bytes=${saved_bytes:-0}
+    # Initialize traffic
+    echo "$username:0" >> "$TRAFFIC_FILE"
     
-    # Add current to saved
-    local total_bytes=$((saved_bytes + current_bytes))
+    # Setup iptables
+    setup_user_iptables "$username"
     
-    # Update the log file
-    sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
-    echo "$username:$total_bytes" >> "$TRAFFIC_LOG"
+    echo ""
+    echo -e "${GREEN}✓ User '$username' created successfully${NC}"
+    [ "$exp_days" -gt 0 ] && echo -e "  Expires: $(days_to_date $exp_days)"
+    [ "$limit" -gt 0 ] && echo -e "  Traffic limit: $(format_bytes $limit)" || echo -e "  Traffic: Unlimited"
     
-    # Reset the iptables counter for this user's rule
-    # Find the rule number and zero it
-    local rule_num=$(iptables -L OUTPUT --line-numbers -n 2>/dev/null | grep "user_traffic_$username" | awk '{print $1}')
-    if [ -n "$rule_num" ]; then
-        iptables -Z OUTPUT "$rule_num" 2>/dev/null
-    fi
-    
-    echo "$total_bytes"
+    pause
 }
 
-# Function to get traffic usage for a user (saved + current)
-get_traffic_usage() {
-    local username=$1
-    
-    # Get current bytes from iptables
-    local current_bytes=$(get_iptables_bytes "$username")
-    
-    # Get saved bytes from log
-    local saved_bytes=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
-    saved_bytes=${saved_bytes:-0}
-    
-    # Return total
-    local total=$((saved_bytes + current_bytes))
-    echo "$total"
-}
-
-# Function to reset traffic for a user
-reset_traffic() {
-    local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
-    
-    # Reset saved traffic
-    sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
-    echo "$username:0" >> "$TRAFFIC_LOG"
-    
-    # Reset iptables counter
-    if [ -n "$uid" ]; then
-        local rule_num=$(iptables -L OUTPUT --line-numbers -n 2>/dev/null | grep "user_traffic_$username" | awk '{print $1}')
-        if [ -n "$rule_num" ]; then
-            iptables -Z OUTPUT "$rule_num" 2>/dev/null
-        fi
-    fi
-}
-
-# Function to setup all user traffic rules (call on startup)
-setup_all_traffic_rules() {
-    local users=$(get_users)
-    for username in $users; do
-        setup_traffic_accounting "$username"
-    done
-}
-
-# Function to format bytes to human readable
-format_bytes() {
-    local bytes=$1
-    if [ "$bytes" -ge 1073741824 ]; then
-        local gb=$((bytes / 1073741824))
-        local remainder=$((bytes % 1073741824))
-        local decimal=$((remainder * 100 / 1073741824))
-        printf "%d.%02d GB" "$gb" "$decimal"
-    elif [ "$bytes" -ge 1048576 ]; then
-        local mb=$((bytes / 1048576))
-        local remainder=$((bytes % 1048576))
-        local decimal=$((remainder * 100 / 1048576))
-        printf "%d.%02d MB" "$mb" "$decimal"
-    elif [ "$bytes" -ge 1024 ]; then
-        local kb=$((bytes / 1024))
-        local remainder=$((bytes % 1024))
-        local decimal=$((remainder * 100 / 1024))
-        printf "%d.%02d KB" "$kb" "$decimal"
-    else
-        echo "$bytes B"
-    fi
-}
-
-# Function to delete user
 delete_user() {
-    echo -e "\n${RED}=== Delete User ===${NC}"
-    
-    mapfile -t users < <(get_users)
-    
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    echo "Select user to delete:"
-    echo "0. Cancel"
-    for i in "${!users[@]}"; do
-        echo "$((i+1)). ${users[$i]}"
-    done
+    header
+    echo -e "${RED}🗑️  Delete User${NC}"
+    line
     echo ""
     
-    read -p "Enter selection: " selection
+    select_user "Select user to delete" || { pause; return; }
     
-    if [ "$selection" = "0" ]; then
+    echo ""
+    echo -e "${YELLOW}User: $SELECTED_USER${NC}"
+    echo ""
+    read -p "Type 'yes' to confirm deletion: " confirm
+    
+    if [ "$confirm" != "yes" ]; then
         echo -e "${YELLOW}Cancelled${NC}"
-        read -p "Press Enter to continue..."
+        pause
         return
     fi
     
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
-        echo -e "${RED}Invalid selection${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
+    echo ""
+    echo -e "${YELLOW}Deleting user...${NC}"
     
-    username="${users[$((selection-1))]}"
+    # Kill all sessions first
+    kill_user_sessions "$SELECTED_USER"
+    sleep 1
     
-    read -p "Delete user '$username'? (yes/no): " confirm
+    # Remove iptables rules
+    local uid=$(id -u "$SELECTED_USER" 2>/dev/null)
+    [ -n "$uid" ] && iptables -D SSH_TRAFFIC -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
     
-    if [ "$confirm" = "yes" ]; then
-        # Save traffic data before deleting
-        save_traffic "$username"
-        
-        # Remove iptables rules for this user
-        local uid=$(id -u "$username" 2>/dev/null)
-        if [ -n "$uid" ]; then
-            while iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "user_traffic_$username" 2>/dev/null; do :; done
-        fi
-        
-        # Remove from config files
-        sed -i "/^$username:/d" "$TRAFFIC_FILE" 2>/dev/null
-        sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
-        
-        # Delete user
-        userdel -r "$username" 2>/dev/null
-        
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}User '$username' deleted${NC}"
-        else
-            userdel "$username" 2>/dev/null
-            rm -rf "/home/$username" 2>/dev/null
-            echo -e "${YELLOW}User deleted (some cleanup may be needed)${NC}"
-        fi
-    else
-        echo -e "${YELLOW}Cancelled${NC}"
-    fi
+    # Remove from config files
+    sed -i "/^$SELECTED_USER:/d" "$TRAFFIC_FILE" 2>/dev/null
+    sed -i "/^$SELECTED_USER:/d" "$LIMITS_FILE" 2>/dev/null
     
-    read -p "Press Enter to continue..."
+    # Delete user and home directory
+    userdel -rf "$SELECTED_USER" 2>/dev/null
+    
+    # Double check home dir removal
+    rm -rf "/home/$SELECTED_USER" 2>/dev/null
+    
+    # Remove from any groups
+    for group in $(groups "$SELECTED_USER" 2>/dev/null); do
+        gpasswd -d "$SELECTED_USER" "$group" 2>/dev/null
+    done
+    
+    # Remove cron jobs
+    crontab -r -u "$SELECTED_USER" 2>/dev/null
+    
+    # Remove mail spool
+    rm -f "/var/mail/$SELECTED_USER" 2>/dev/null
+    
+    echo -e "${GREEN}✓ User '$SELECTED_USER' completely removed${NC}"
+    pause
 }
 
-# Function to list users with details
 list_users() {
-    echo -e "\n${GREEN}=== User List ===${NC}"
-    printf "%-12s %-12s %-15s %-12s %-10s\n" "Username" "Status" "Expires" "Traffic Used" "Limit"
-    echo "------------------------------------------------------------------------"
+    header
+    echo -e "${CYAN}👥 User List${NC}"
+    line
+    echo ""
     
-    mapfile -t users < <(get_users)
+    local users=($(get_users))
     
     if [ ${#users[@]} -eq 0 ]; then
         echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
+        pause
         return
     fi
     
-    for username in "${users[@]}"; do
-        # Get expiration date
-        exp_date=$(chage -l "$username" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-        if [ "$exp_date" = "never" ] || [ -z "$exp_date" ]; then
-            exp_date="Never"
-            status="${GREEN}Active${NC}"
-        else
-            # Check if expired
-            exp_epoch=$(date -d "$exp_date" +%s 2>/dev/null)
-            now_epoch=$(date +%s)
-            if [ -n "$exp_epoch" ] && [ "$now_epoch" -gt "$exp_epoch" ]; then
-                status="${RED}Expired${NC}"
-            else
-                status="${GREEN}Active${NC}"
-            fi
-        fi
+    printf "${BOLD}%-12s %-10s %-12s %-12s %-10s${NC}\n" "USER" "STATUS" "EXPIRES" "TRAFFIC" "LIMIT"
+    line
+    
+    for user in "${users[@]}"; do
+        local status="${GREEN}Active${NC}"
+        is_expired "$user" && status="${RED}Expired${NC}"
         
-        # Get traffic info
-        traffic_used=$(get_traffic_usage "$username")
-        traffic_used_fmt=$(format_bytes "$traffic_used")
+        local exp=$(get_expiry "$user")
+        local traffic=$(format_bytes $(get_traffic "$user"))
+        local limit=$(get_limit "$user")
+        local limit_str="Unlimited"
+        [ -n "$limit" ] && [ "$limit" -gt 0 ] && limit_str=$(format_bytes "$limit")
         
-        # Get traffic limit from config
-        traffic_info=$(grep "^$username:" "$TRAFFIC_FILE" 2>/dev/null)
-        if [ -n "$traffic_info" ]; then
-            traffic_limit=$(echo "$traffic_info" | cut -d: -f2)
-            if [ -n "$traffic_limit" ] && [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
-                traffic_limit_fmt=$(format_bytes "$traffic_limit")
-            else
-                traffic_limit_fmt="Unlimited"
-            fi
-        else
-            traffic_limit_fmt="Unlimited"
-        fi
-        
-        printf "%-12s %-12b %-15s %-12s %-10s\n" "$username" "$status" "$exp_date" "$traffic_used_fmt" "$traffic_limit_fmt"
+        printf "%-12s %-18b %-12s %-12s %-10s\n" "$user" "$status" "$exp" "$traffic" "$limit_str"
     done
     
-    echo ""
-    read -p "Press Enter to continue..."
+    pause
 }
 
-# Function to show online users
 show_online() {
-    echo -e "\n${CYAN}=== Online Users ===${NC}"
+    header
+    echo -e "${CYAN}🟢 Online Users${NC}"
+    line
     echo ""
     
-    # Get SSH connections
-    online=$(who 2>/dev/null | grep -v "^root " | awk '{print $1, $2, $3, $4, $5}')
+    local found=0
     
-    if [ -z "$online" ]; then
-        echo -e "${YELLOW}No users currently online${NC}"
-    else
-        printf "%-15s %-10s %-20s %-15s\n" "Username" "TTY" "Login Time" "From"
-        echo "------------------------------------------------------------"
+    printf "${BOLD}%-12s %-15s %-20s${NC}\n" "USER" "IP" "LOGIN TIME"
+    line
+    
+    while read line; do
+        local user=$(echo "$line" | awk '{print $1}')
+        local ip=$(echo "$line" | awk '{print $5}' | tr -d '()')
+        local time=$(echo "$line" | awk '{print $3, $4}')
         
-        who 2>/dev/null | while read line; do
-            username=$(echo "$line" | awk '{print $1}')
-            tty=$(echo "$line" | awk '{print $2}')
-            login_time=$(echo "$line" | awk '{print $3, $4}')
-            from=$(echo "$line" | awk '{print $5}' | tr -d '()')
-            
-            # Skip excluded users
-            if echo "$username" | grep -qE "^($EXCLUDED_USERS|root)$"; then
-                continue
-            fi
-            
-            printf "%-15s %-10s %-20s %-15s\n" "$username" "$tty" "$login_time" "$from"
-        done
-    fi
+        echo "$user" | grep -qE "^($EXCLUDED_USERS|root)$" && continue
+        
+        printf "%-12s %-15s %-20s\n" "$user" "$ip" "$time"
+        found=1
+    done < <(who 2>/dev/null)
+    
+    [ $found -eq 0 ] && echo -e "${YELLOW}No users online${NC}"
     
     echo ""
+    echo -e "${CYAN}SSH connections: $(ss -tn 2>/dev/null | grep ':22 ' | wc -l)${NC}"
     
-    # Show active SSH sessions count
-    ssh_count=$(ss -tn 2>/dev/null | grep ":22 " | wc -l)
-    echo -e "${CYAN}Active SSH connections: $ssh_count${NC}"
-    
-    echo ""
-    read -p "Press Enter to continue..."
+    pause
 }
 
-# Function to change password
+#═══════════════════════════════════════════════════════════════════
+# PASSWORD & EXPIRATION
+#═══════════════════════════════════════════════════════════════════
+
 change_password() {
-    echo -e "\n${YELLOW}=== Change Password ===${NC}"
-    
-    mapfile -t users < <(get_users)
-    
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    echo "Select user:"
-    echo "0. Cancel"
-    for i in "${!users[@]}"; do
-        echo "$((i+1)). ${users[$i]}"
-    done
+    header
+    echo -e "${YELLOW}🔑 Change Password${NC}"
+    line
     echo ""
     
-    read -p "Enter selection: " selection
+    select_user "Select user" || { pause; return; }
     
-    if [ "$selection" = "0" ]; then
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
-        echo -e "${RED}Invalid selection${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    username="${users[$((selection-1))]}"
-    
-    read -sp "Enter new password: " password
     echo ""
-    read -sp "Confirm password: " password_confirm
+    read -sp "New password: " pass
+    echo ""
+    read -sp "Confirm: " pass2
     echo ""
     
-    if [ "$password" != "$password_confirm" ]; then
-        echo -e "${RED}Passwords do not match${NC}"
-        read -p "Press Enter to continue..."
-        return
+    [ "$pass" != "$pass2" ] && echo -e "${RED}Passwords don't match${NC}" && pause && return
+    [ -z "$pass" ] && echo -e "${RED}Password required${NC}" && pause && return
+    
+    echo "$SELECTED_USER:$pass" | chpasswd 2>/dev/null
+    if [ $? -ne 0 ]; then
+        local hash=$(openssl passwd -6 "$pass")
+        usermod -p "$hash" "$SELECTED_USER"
     fi
     
-    if [ -z "$password" ]; then
-        echo -e "${RED}Password cannot be empty${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    password_hash=$(openssl passwd -6 "$password")
-    usermod -p "$password_hash" "$username"
-    
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Password changed for '$username'${NC}"
-    else
-        echo -e "${RED}Failed to change password${NC}"
-    fi
-    
-    read -p "Press Enter to continue..."
+    echo -e "${GREEN}✓ Password changed${NC}"
+    pause
 }
 
-# Function to manage expiration
-manage_expiration() {
-    echo -e "\n${YELLOW}=== Manage Expiration ===${NC}"
-    
-    mapfile -t users < <(get_users)
-    
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    echo "Select user:"
-    echo "0. Cancel"
-    for i in "${!users[@]}"; do
-        exp_date=$(chage -l "${users[$i]}" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-        echo "$((i+1)). ${users[$i]} (Expires: $exp_date)"
-    done
+manage_expiry() {
+    header
+    echo -e "${YELLOW}📅 Manage Expiration${NC}"
+    line
     echo ""
     
-    read -p "Enter selection: " selection
+    select_user "Select user" || { pause; return; }
     
-    if [ "$selection" = "0" ]; then
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
-        echo -e "${RED}Invalid selection${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    username="${users[$((selection-1))]}"
-    
+    local current=$(get_expiry "$SELECTED_USER")
     echo ""
-    echo "Set new expiration for '$username':"
-    echo "1. Extend 7 days from now"
-    echo "2. Extend 30 days from now"
-    echo "3. Extend 90 days from now"
-    echo "4. Extend 365 days from now"
-    echo "5. Custom days from now"
-    echo "6. Remove expiration"
-    echo "7. Deactivate user now"
-    read -p "Select option [1-7]: " exp_choice
-    
-    case $exp_choice in
-        1) 
-            exp_date=$(days_to_date 7)
-            chage -E "$exp_date" "$username"
-            echo -e "${GREEN}Expiration set to: $exp_date${NC}"
-            ;;
-        2) 
-            exp_date=$(days_to_date 30)
-            chage -E "$exp_date" "$username"
-            echo -e "${GREEN}Expiration set to: $exp_date${NC}"
-            ;;
-        3) 
-            exp_date=$(days_to_date 90)
-            chage -E "$exp_date" "$username"
-            echo -e "${GREEN}Expiration set to: $exp_date${NC}"
-            ;;
-        4) 
-            exp_date=$(days_to_date 365)
-            chage -E "$exp_date" "$username"
-            echo -e "${GREEN}Expiration set to: $exp_date${NC}"
-            ;;
-        5)
-            read -p "Enter number of days: " days
-            if [[ "$days" =~ ^[0-9]+$ ]]; then
-                exp_date=$(days_to_date $days)
-                chage -E "$exp_date" "$username"
-                echo -e "${GREEN}Expiration set to: $exp_date${NC}"
-            else
-                echo -e "${RED}Invalid number${NC}"
-            fi
-            ;;
-        6)
-            chage -E -1 "$username"
-            echo -e "${GREEN}Expiration removed for '$username'${NC}"
-            ;;
-        7)
-            chage -E 0 "$username"
-            echo -e "${YELLOW}User '$username' deactivated${NC}"
-            ;;
-        *)
-            echo -e "${YELLOW}No changes made${NC}"
-            ;;
-    esac
-    
-    read -p "Press Enter to continue..."
-}
-
-# Function to manage traffic limits
-manage_traffic() {
-    echo -e "\n${YELLOW}=== Manage Traffic Limits ===${NC}"
-    
-    mapfile -t users < <(get_users)
-    
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    echo "Select user:"
-    echo "0. Cancel"
-    for i in "${!users[@]}"; do
-        traffic_info=$(grep "^${users[$i]}:" "$TRAFFIC_FILE" 2>/dev/null)
-        if [ -n "$traffic_info" ]; then
-            limit=$(echo "$traffic_info" | cut -d: -f2)
-            if [ "$limit" -gt 0 ]; then
-                limit_fmt=$(format_bytes "$limit")
-            else
-                limit_fmt="Unlimited"
-            fi
-        else
-            limit_fmt="Unlimited"
-        fi
-        echo "$((i+1)). ${users[$i]} (Limit: $limit_fmt)"
-    done
+    echo -e "Current: ${CYAN}$current${NC}"
     echo ""
     
-    read -p "Enter selection: " selection
-    
-    if [ "$selection" = "0" ]; then
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
-        echo -e "${RED}Invalid selection${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    username="${users[$((selection-1))]}"
-    
+    echo "1. Add 7 days       5. Custom days"
+    echo "2. Add 30 days      6. Remove expiration"
+    echo "3. Add 90 days      7. Deactivate now"
+    echo "4. Add 365 days     0. Cancel"
     echo ""
-    echo "Set traffic limit for '$username':"
-    echo "1. 1 GB"
-    echo "2. 5 GB"
-    echo "3. 10 GB"
-    echo "4. 50 GB"
-    echo "5. 100 GB"
-    echo "6. Custom GB"
-    echo "7. Unlimited"
-    echo "8. Reset usage counter"
-    read -p "Select option [1-8]: " traffic_choice
-    
-    case $traffic_choice in
-        1) traffic_limit=1 ;;
-        2) traffic_limit=5 ;;
-        3) traffic_limit=10 ;;
-        4) traffic_limit=50 ;;
-        5) traffic_limit=100 ;;
-        6) 
-            read -p "Enter limit in GB: " traffic_limit
-            if ! [[ "$traffic_limit" =~ ^[0-9]+$ ]]; then
-                echo -e "${RED}Invalid number${NC}"
-                read -p "Press Enter to continue..."
-                return
-            fi
-            ;;
-        7) traffic_limit=0 ;;
-        8)
-            # Reset traffic counter for user
-            reset_traffic "$username"
-            echo -e "${GREEN}Traffic counter reset for '$username'${NC}"
-            read -p "Press Enter to continue..."
-            return
-            ;;
-        *)
-            echo -e "${YELLOW}No changes made${NC}"
-            read -p "Press Enter to continue..."
-            return
-            ;;
-    esac
-    
-    # Update traffic limit
-    sed -i "/^$username:/d" "$TRAFFIC_FILE" 2>/dev/null
-    if [ "$traffic_limit" -gt 0 ]; then
-        traffic_bytes=$((traffic_limit * 1073741824))
-        echo "$username:$traffic_bytes:0" >> "$TRAFFIC_FILE"
-        echo -e "${GREEN}Traffic limit set to ${traffic_limit} GB${NC}"
-    else
-        echo "$username:0:0" >> "$TRAFFIC_FILE"
-        echo -e "${GREEN}Traffic set to unlimited${NC}"
-    fi
-    
-    # Ensure iptables rule exists
-    setup_traffic_accounting "$username"
-    
-    read -p "Press Enter to continue..."
-}
-
-# Function to view traffic usage
-view_traffic() {
-    echo -e "\n${CYAN}=== Traffic Usage ===${NC}"
-    printf "%-15s %-15s %-15s %-10s\n" "Username" "Used" "Limit" "Status"
-    echo "------------------------------------------------------------"
-    
-    mapfile -t users < <(get_users)
-    
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No users found${NC}"
-        read -p "Press Enter to continue..."
-        return
-    fi
-    
-    for username in "${users[@]}"; do
-        # Get current usage
-        traffic_used=$(get_traffic_usage "$username")
-        traffic_used_fmt=$(format_bytes "$traffic_used")
-        
-        # Get limit from config
-        traffic_info=$(grep "^$username:" "$TRAFFIC_FILE" 2>/dev/null)
-        if [ -n "$traffic_info" ]; then
-            traffic_limit=$(echo "$traffic_info" | cut -d: -f2)
-            if [ -n "$traffic_limit" ] && [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
-                traffic_limit_fmt=$(format_bytes "$traffic_limit")
-                
-                # Calculate percentage and status
-                if [ "$traffic_used" -ge "$traffic_limit" ] 2>/dev/null; then
-                    status="${RED}EXCEEDED${NC}"
-                elif [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
-                    percent=$((traffic_used * 100 / traffic_limit))
-                    if [ "$percent" -ge 90 ]; then
-                        status="${YELLOW}${percent}%${NC}"
-                    else
-                        status="${GREEN}${percent}%${NC}"
-                    fi
-                else
-                    status="${GREEN}OK${NC}"
-                fi
-            else
-                traffic_limit_fmt="Unlimited"
-                status="${GREEN}OK${NC}"
-            fi
-        else
-            traffic_limit_fmt="Unlimited"
-            status="${GREEN}OK${NC}"
-        fi
-        
-        printf "%-15s %-15s %-15s %-10b\n" "$username" "$traffic_used_fmt" "$traffic_limit_fmt" "$status"
-    done
-    
-    echo ""
-    read -p "Press Enter to continue..."
-}
-
-# Main loop
-while true; do
-    show_menu
-    read -p "Select an option [1-9]: " choice
+    read -p "Choice: " choice
     
     case $choice in
-        1) create_user ;;
-        2) delete_user ;;
-        3) list_users ;;
-        4) show_online ;;
-        5) change_password ;;
-        6) manage_expiration ;;
-        7) manage_traffic ;;
-        8) view_traffic ;;
-        9)
-            # Save all traffic data before exiting
-            for user in $(get_users); do
-                save_traffic "$user"
-            done
-            echo -e "${GREEN}Exiting...${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option${NC}"
-            sleep 1
-            ;;
+        1) chage -E "$(days_to_date 7)" "$SELECTED_USER" ;;
+        2) chage -E "$(days_to_date 30)" "$SELECTED_USER" ;;
+        3) chage -E "$(days_to_date 90)" "$SELECTED_USER" ;;
+        4) chage -E "$(days_to_date 365)" "$SELECTED_USER" ;;
+        5) read -p "Days: " d; chage -E "$(days_to_date $d)" "$SELECTED_USER" ;;
+        6) chage -E -1 "$SELECTED_USER" ;;
+        7) chage -E 0 "$SELECTED_USER"; kill_user_sessions "$SELECTED_USER" ;;
+        0) return ;;
     esac
-done
+    
+    echo -e "${GREEN}✓ Updated. New expiry: $(get_expiry $SELECTED_USER)${NC}"
+    pause
+}
+
+#═══════════════════════════════════════════════════════════════════
+# TRAFFIC MANAGEMENT
+#═══════════════════════════════════════════════════════════════════
+
+manage_traffic() {
+    header
+    echo -e "${CYAN}📊 Manage Traffic${NC}"
+    line
+    echo ""
+    
+    select_user "Select user" || { pause; return; }
+    
+    local traffic=$(get_traffic "$SELECTED_USER")
+    local limit=$(get_limit "$SELECTED_USER")
+    
+    echo ""
+    echo -e "User: ${CYAN}$SELECTED_USER${NC}"
+    echo -e "Used: ${YELLOW}$(format_bytes $traffic)${NC}"
+    [ -n "$limit" ] && [ "$limit" -gt 0 ] && echo -e "Limit: $(format_bytes $limit)" || echo "Limit: Unlimited"
+    echo ""
+    
+    echo "1. Set limit 5 GB      5. Custom limit"
+    echo "2. Set limit 10 GB     6. Remove limit"
+    echo "3. Set limit 50 GB     7. Reset usage"
+    echo "4. Set limit 100 GB    0. Cancel"
+    echo ""
+    read -p "Choice: " choice
+    
+    case $choice in
+        1) set_limit "$SELECTED_USER" $((5 * 1073741824)) ;;
+        2) set_limit "$SELECTED_USER" $((10 * 1073741824)) ;;
+        3) set_limit "$SELECTED_USER" $((50 * 1073741824)) ;;
+        4) set_limit "$SELECTED_USER" $((100 * 1073741824)) ;;
+        5) read -p "Limit in GB: " gb; set_limit "$SELECTED_USER" $((gb * 1073741824)) ;;
+        6) set_limit "$SELECTED_USER" 0 ;;
+        7) reset_traffic "$SELECTED_USER"; echo -e "${GREEN}✓ Traffic reset${NC}"; pause; return ;;
+        0) return ;;
+    esac
+    
+    echo -e "${GREEN}✓ Limit updated${NC}"
+    pause
+}
+
+view_traffic() {
+    header
+    echo -e "${CYAN}📈 Traffic Usage${NC}"
+    line
+    echo ""
+    
+    local users=($(get_users))
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No users found${NC}"
+        pause
+        return
+    fi
+    
+    printf "${BOLD}%-12s %-15s %-15s %-10s${NC}\n" "USER" "USED" "LIMIT" "STATUS"
+    line
+    
+    for user in "${users[@]}"; do
+        local traffic=$(get_traffic "$user")
+        local limit=$(get_limit "$user")
+        local status="${GREEN}OK${NC}"
+        local limit_str="Unlimited"
+        
+        if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
+            limit_str=$(format_bytes "$limit")
+            local pct=$((traffic * 100 / limit))
+            if [ $traffic -ge $limit ]; then
+                status="${RED}EXCEEDED${NC}"
+            elif [ $pct -ge 90 ]; then
+                status="${YELLOW}${pct}%${NC}"
+            else
+                status="${GREEN}${pct}%${NC}"
+            fi
+        fi
+        
+        printf "%-12s %-15s %-15s %-10b\n" "$user" "$(format_bytes $traffic)" "$limit_str" "$status"
+    done
+    
+    pause
+}
+
+#═══════════════════════════════════════════════════════════════════
+# MAIN MENU
+#═══════════════════════════════════════════════════════════════════
+
+main_menu() {
+    while true; do
+        header
+        echo -e "${BOLD}Main Menu${NC}"
+        line
+        echo ""
+        echo -e "  ${BOLD}USER MANAGEMENT${NC}"
+        echo -e "    ${CYAN}1${NC}. Create user        ${CYAN}4${NC}. Online users"
+        echo -e "    ${CYAN}2${NC}. Delete user        ${CYAN}5${NC}. List all users"
+        echo -e "    ${CYAN}3${NC}. Change password"
+        echo ""
+        echo -e "  ${BOLD}ACCOUNT SETTINGS${NC}"
+        echo -e "    ${CYAN}6${NC}. Manage expiration"
+        echo ""
+        echo -e "  ${BOLD}TRAFFIC${NC}"
+        echo -e "    ${CYAN}7${NC}. View traffic       ${CYAN}8${NC}. Manage limits"
+        echo ""
+        line
+        echo -e "    ${CYAN}0${NC}. Exit"
+        echo ""
+        
+        read -p "Choice: " choice
+        
+        case $choice in
+            1) create_user ;;
+            2) delete_user ;;
+            3) change_password ;;
+            4) show_online ;;
+            5) list_users ;;
+            6) manage_expiry ;;
+            7) view_traffic ;;
+            8) manage_traffic ;;
+            0)
+                # Save traffic before exit
+                for u in $(get_users); do save_traffic "$u"; done
+                echo -e "${GREEN}Goodbye!${NC}"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+# Run
+init
+main_menu
