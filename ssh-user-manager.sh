@@ -13,7 +13,8 @@ NC='\033[0m' # No Color
 # Configuration directory
 CONFIG_DIR="/etc/ssh-user-manager"
 TRAFFIC_FILE="$CONFIG_DIR/traffic_limits.conf"
-TRAFFIC_LOG="$CONFIG_DIR/traffic_usage.log"
+TRAFFIC_LOG="$CONFIG_DIR/traffic_usage.dat"
+USER_CHAINS_FILE="$CONFIG_DIR/user_chains.conf"
 
 # System users to exclude from management (add usernames separated by |)
 EXCLUDED_USERS="nobody|linuxuser"
@@ -35,6 +36,16 @@ init_config() {
     if [ ! -f "$TRAFFIC_LOG" ]; then
         touch "$TRAFFIC_LOG"
     fi
+    if [ ! -f "$USER_CHAINS_FILE" ]; then
+        touch "$USER_CHAINS_FILE"
+    fi
+    
+    # Create SSH-USER-TRAFFIC chain if it doesn't exist
+    iptables -N SSH-USER-TRAFFIC 2>/dev/null
+    
+    # Make sure chain is in INPUT and OUTPUT
+    iptables -C INPUT -j SSH-USER-TRAFFIC 2>/dev/null || iptables -I INPUT -j SSH-USER-TRAFFIC
+    iptables -C OUTPUT -j SSH-USER-TRAFFIC 2>/dev/null || iptables -I OUTPUT -j SSH-USER-TRAFFIC
 }
 
 # Initialize on script start
@@ -59,7 +70,8 @@ show_menu() {
     echo "6. Manage user expiration"
     echo "7. Manage traffic limits"
     echo "8. View traffic usage"
-    echo "9. Exit"
+    echo "9. Add traffic manually"
+    echo "10. Exit"
     echo "========================================"
 }
 
@@ -207,45 +219,96 @@ create_user() {
 # Function to setup iptables traffic accounting for a user
 setup_traffic_accounting() {
     local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
     
-    if [ -z "$uid" ]; then
-        return
+    # Create a unique chain for this user
+    local chain_name="USER_${username}"
+    
+    # Create chain if it doesn't exist
+    iptables -N "$chain_name" 2>/dev/null
+    
+    # Flush existing rules in user chain
+    iptables -F "$chain_name" 2>/dev/null
+    
+    # Add counting rules (just count, don't block)
+    iptables -A "$chain_name" -j RETURN
+    
+    # Remove old jumps to this chain
+    iptables -D SSH-USER-TRAFFIC -m comment --comment "user:$username" -j "$chain_name" 2>/dev/null
+    
+    # Add jump to user chain from main tracking chain
+    iptables -A SSH-USER-TRAFFIC -m comment --comment "user:$username" -j "$chain_name"
+    
+    # Record that this user has a chain
+    grep -q "^$username$" "$USER_CHAINS_FILE" 2>/dev/null || echo "$username" >> "$USER_CHAINS_FILE"
+    
+    # Initialize traffic log entry if not exists
+    if ! grep -q "^$username:" "$TRAFFIC_LOG" 2>/dev/null; then
+        echo "$username:0" >> "$TRAFFIC_LOG"
     fi
-    
-    # Remove existing rules for this user
-    iptables -D OUTPUT -m owner --uid-owner "$uid" -j ACCEPT 2>/dev/null
-    iptables -D INPUT -m owner --uid-owner "$uid" -j ACCEPT 2>/dev/null
-    
-    # Add new accounting rules
-    iptables -A OUTPUT -m owner --uid-owner "$uid" -j ACCEPT 2>/dev/null
 }
 
-# Function to get traffic usage for a user
+# Function to get current iptables bytes for user
+get_iptables_bytes() {
+    local username=$1
+    local chain_name="USER_${username}"
+    
+    # Get bytes from the user's chain (both INPUT and OUTPUT contribute)
+    local bytes=$(iptables -L "$chain_name" -v -n -x 2>/dev/null | tail -n +3 | awk '{sum += $2} END {print sum+0}')
+    echo "${bytes:-0}"
+}
+
+# Function to save current traffic and reset counters
+save_traffic() {
+    local username=$1
+    local chain_name="USER_${username}"
+    
+    # Get current bytes from iptables
+    local current_bytes=$(get_iptables_bytes "$username")
+    
+    # Get saved bytes
+    local saved_bytes=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
+    saved_bytes=${saved_bytes:-0}
+    
+    # Add current to saved
+    local total_bytes=$((saved_bytes + current_bytes))
+    
+    # Update the log file
+    sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
+    echo "$username:$total_bytes" >> "$TRAFFIC_LOG"
+    
+    # Reset the iptables counter for this user
+    iptables -Z "$chain_name" 2>/dev/null
+    
+    echo "$total_bytes"
+}
+
+# Function to get traffic usage for a user (saved + current)
 get_traffic_usage() {
     local username=$1
-    local uid=$(id -u "$username" 2>/dev/null)
     
-    if [ -z "$uid" ]; then
-        echo "0"
-        return
-    fi
+    # Get current bytes from iptables
+    local current_bytes=$(get_iptables_bytes "$username")
     
-    # Get bytes from iptables OUTPUT chain for this user (use -x for exact bytes)
-    local bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null | grep "owner UID match $uid" | awk '{print $2}')
+    # Get saved bytes from log
+    local saved_bytes=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
+    saved_bytes=${saved_bytes:-0}
     
-    # If iptables shows nothing, try to get from saved data
-    if [ -z "$bytes" ] || [ "$bytes" = "0" ]; then
-        # Check if we have saved usage data
-        local saved_usage=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
-        if [ -n "$saved_usage" ]; then
-            bytes=$saved_usage
-        else
-            bytes=0
-        fi
-    fi
+    # Return total
+    local total=$((saved_bytes + current_bytes))
+    echo "$total"
+}
+
+# Function to reset traffic for a user
+reset_traffic() {
+    local username=$1
+    local chain_name="USER_${username}"
     
-    echo "$bytes"
+    # Reset saved traffic
+    sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
+    echo "$username:0" >> "$TRAFFIC_LOG"
+    
+    # Reset iptables counter
+    iptables -Z "$chain_name" 2>/dev/null
 }
 
 # Function to format bytes to human readable
@@ -309,14 +372,16 @@ delete_user() {
     read -p "Delete user '$username'? (yes/no): " confirm
     
     if [ "$confirm" = "yes" ]; then
-        # Remove iptables rules
-        local uid=$(id -u "$username" 2>/dev/null)
-        if [ -n "$uid" ]; then
-            iptables -D OUTPUT -m owner --uid-owner "$uid" -j ACCEPT 2>/dev/null
-        fi
+        # Remove iptables chain and rules
+        local chain_name="USER_${username}"
+        iptables -D SSH-USER-TRAFFIC -m comment --comment "user:$username" -j "$chain_name" 2>/dev/null
+        iptables -F "$chain_name" 2>/dev/null
+        iptables -X "$chain_name" 2>/dev/null
         
-        # Remove from traffic config
+        # Remove from config files
         sed -i "/^$username:/d" "$TRAFFIC_FILE" 2>/dev/null
+        sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
+        sed -i "/^$username$/d" "$USER_CHAINS_FILE" 2>/dev/null
         
         # Delete user
         userdel -r "$username" 2>/dev/null
@@ -658,11 +723,8 @@ manage_traffic() {
             ;;
         7) traffic_limit=0 ;;
         8)
-            # Reset iptables counters for user
-            local uid=$(id -u "$username" 2>/dev/null)
-            if [ -n "$uid" ]; then
-                iptables -Z OUTPUT 2>/dev/null
-            fi
+            # Reset traffic counter for user
+            reset_traffic "$username"
             echo -e "${GREEN}Traffic counter reset for '$username'${NC}"
             read -p "Press Enter to continue..."
             return
@@ -746,10 +808,94 @@ view_traffic() {
     read -p "Press Enter to continue..."
 }
 
+# Function to manually add traffic (for testing or manual accounting)
+add_traffic_manual() {
+    echo -e "\n${YELLOW}=== Add Traffic Manually ===${NC}"
+    
+    mapfile -t users < <(get_users)
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No users found${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    echo "Select user:"
+    echo "0. Cancel"
+    for i in "${!users[@]}"; do
+        current=$(get_traffic_usage "${users[$i]}")
+        current_fmt=$(format_bytes "$current")
+        echo "$((i+1)). ${users[$i]} (Current: $current_fmt)"
+    done
+    echo ""
+    
+    read -p "Enter selection: " selection
+    
+    if [ "$selection" = "0" ]; then
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
+        echo -e "${RED}Invalid selection${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    username="${users[$((selection-1))]}"
+    
+    echo ""
+    echo "Add traffic for '$username':"
+    echo "1. Add 100 MB"
+    echo "2. Add 500 MB"
+    echo "3. Add 1 GB"
+    echo "4. Add 5 GB"
+    echo "5. Custom MB"
+    read -p "Select option [1-5]: " add_choice
+    
+    case $add_choice in
+        1) add_bytes=$((100 * 1048576)) ;;
+        2) add_bytes=$((500 * 1048576)) ;;
+        3) add_bytes=$((1 * 1073741824)) ;;
+        4) add_bytes=$((5 * 1073741824)) ;;
+        5)
+            read -p "Enter amount in MB: " add_mb
+            if ! [[ "$add_mb" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Invalid number${NC}"
+                read -p "Press Enter to continue..."
+                return
+            fi
+            add_bytes=$((add_mb * 1048576))
+            ;;
+        *)
+            echo -e "${YELLOW}Cancelled${NC}"
+            read -p "Press Enter to continue..."
+            return
+            ;;
+    esac
+    
+    # Get current saved bytes
+    local saved_bytes=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
+    saved_bytes=${saved_bytes:-0}
+    
+    # Add to saved
+    local new_total=$((saved_bytes + add_bytes))
+    
+    # Update the log file
+    sed -i "/^$username:/d" "$TRAFFIC_LOG" 2>/dev/null
+    echo "$username:$new_total" >> "$TRAFFIC_LOG"
+    
+    local added_fmt=$(format_bytes "$add_bytes")
+    local total_fmt=$(format_bytes "$new_total")
+    echo -e "${GREEN}Added $added_fmt to '$username'. New total: $total_fmt${NC}"
+    
+    read -p "Press Enter to continue..."
+}
+
 # Main loop
 while true; do
     show_menu
-    read -p "Select an option [1-9]: " choice
+    read -p "Select an option [1-10]: " choice
     
     case $choice in
         1) create_user ;;
@@ -760,7 +906,8 @@ while true; do
         6) manage_expiration ;;
         7) manage_traffic ;;
         8) view_traffic ;;
-        9)
+        9) add_traffic_manual ;;
+        10)
             echo -e "${GREEN}Exiting...${NC}"
             exit 0
             ;;
