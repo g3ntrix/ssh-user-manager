@@ -41,21 +41,38 @@ create_user() {
         return
     fi
     
+    # Get password
+    read -sp "Enter password for '$username': " password
+    echo ""
+    read -sp "Confirm password: " password_confirm
+    echo ""
+    
+    if [ "$password" != "$password_confirm" ]; then
+        echo -e "${RED}Error: Passwords do not match${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    if [ -z "$password" ]; then
+        echo -e "${RED}Error: Password cannot be empty${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
     # Create user with home directory
     useradd -m -s /bin/bash "$username"
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}User '$username' created successfully${NC}"
-        
-        # Set password
-        echo "Setting password for user '$username':"
-        passwd "$username"
+        # Set password using chpasswd (more reliable than passwd)
+        echo "$username:$password" | chpasswd
         
         if [ $? -eq 0 ]; then
-            echo -e "${GREEN}Password set successfully${NC}"
-            echo -e "${YELLOW}User '$username' can now connect via SSH${NC}"
+            echo -e "${GREEN}User '$username' created successfully with password${NC}"
+            echo -e "${YELLOW}User can now connect via SSH${NC}"
         else
-            echo -e "${RED}Failed to set password${NC}"
+            echo -e "${RED}User created but failed to set password${NC}"
+            # Clean up the user if password setting failed
+            userdel -r "$username" 2>/dev/null
         fi
     else
         echo -e "${RED}Failed to create user${NC}"
@@ -67,14 +84,39 @@ create_user() {
 # Function to delete user
 delete_user() {
     echo -e "\n${RED}=== Delete User ===${NC}"
-    read -p "Enter username to delete: " username
     
-    # Check if user exists
-    if ! id "$username" &>/dev/null; then
-        echo -e "${RED}Error: User '$username' does not exist${NC}"
+    # Get list of regular users (UID >= 1000, exclude nobody)
+    mapfile -t users < <(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No regular users found${NC}"
         read -p "Press Enter to continue..."
         return
     fi
+    
+    echo "Select user to delete:"
+    echo "0. Cancel"
+    for i in "${!users[@]}"; do
+        echo "$((i+1)). ${users[$i]}"
+    done
+    echo ""
+    
+    read -p "Enter selection: " selection
+    
+    if [ "$selection" = "0" ]; then
+        echo -e "${YELLOW}Deletion cancelled${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    # Validate selection
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
+        echo -e "${RED}Invalid selection${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    username="${users[$((selection-1))]}"
     
     # Prevent deleting root
     if [ "$username" = "root" ]; then
@@ -84,7 +126,7 @@ delete_user() {
     fi
     
     # Confirm deletion
-    read -p "Are you sure you want to delete user '$username'? (yes/no): " confirm
+    read -p "Delete user '$username' and their home directory? (yes/no): " confirm
     
     if [ "$confirm" = "yes" ]; then
         # Delete user and home directory
@@ -97,6 +139,8 @@ delete_user() {
             userdel "$username" 2>/dev/null
             if [ $? -eq 0 ]; then
                 echo -e "${YELLOW}User '$username' deleted (home directory may still exist)${NC}"
+                # Try to remove home directory manually
+                rm -rf "/home/$username" 2>/dev/null
             else
                 echo -e "${RED}Failed to delete user${NC}"
             fi
@@ -124,20 +168,63 @@ list_users() {
 # Function to change user password
 change_password() {
     echo -e "\n${YELLOW}=== Change User Password ===${NC}"
-    read -p "Enter username: " username
     
-    # Check if user exists
-    if ! id "$username" &>/dev/null; then
-        echo -e "${RED}Error: User '$username' does not exist${NC}"
+    # Get list of regular users
+    mapfile -t users < <(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd)
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No regular users found${NC}"
         read -p "Press Enter to continue..."
         return
     fi
     
-    echo "Setting new password for user '$username':"
-    passwd "$username"
+    echo "Select user:"
+    echo "0. Cancel"
+    for i in "${!users[@]}"; do
+        echo "$((i+1)). ${users[$i]}"
+    done
+    echo ""
+    
+    read -p "Enter selection: " selection
+    
+    if [ "$selection" = "0" ]; then
+        echo -e "${YELLOW}Operation cancelled${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    # Validate selection
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#users[@]} ]; then
+        echo -e "${RED}Invalid selection${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    username="${users[$((selection-1))]}"
+    
+    # Get new password
+    read -sp "Enter new password for '$username': " password
+    echo ""
+    read -sp "Confirm password: " password_confirm
+    echo ""
+    
+    if [ "$password" != "$password_confirm" ]; then
+        echo -e "${RED}Error: Passwords do not match${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    if [ -z "$password" ]; then
+        echo -e "${RED}Error: Password cannot be empty${NC}"
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    # Set password using chpasswd
+    echo "$username:$password" | chpasswd
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Password changed successfully${NC}"
+        echo -e "${GREEN}Password changed successfully for '$username'${NC}"
     else
         echo -e "${RED}Failed to change password${NC}"
     fi
