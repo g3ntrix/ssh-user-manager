@@ -69,41 +69,60 @@ days_to_date() {
 # Setup traffic tracking for a user
 setup_user_iptables() {
     local user=$1
-    # Ensure conntrack is available
-    which conntrack >/dev/null 2>&1 || apt-get install -y conntrack >/dev/null 2>&1
-    touch "$CONFIG_DIR/session_$user.dat" 2>/dev/null
+    # Ensure nethogs is available
+    which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
+    
+    # Create session tracking file
+    local session_file="$CONFIG_DIR/session_$user.dat"
+    touch "$session_file" 2>/dev/null
 }
 
-# Get live session traffic using multiple methods
-get_session_traffic() {
+# Store last known /proc/pid/io values for delta calculation
+PROC_IO_BASELINE="$CONFIG_DIR/proc_io_baseline.dat"
+
+# Get accumulated bytes from /proc/[pid]/io
+# This method reads actual disk I/O which includes network for SSH tunnels
+get_proc_io_traffic() {
     local user=$1
     local total=0
     
-    # Method 1: Try /proc/[pid]/io for sshd processes
     local pids=$(pgrep -u "$user" sshd 2>/dev/null)
-    if [ -n "$pids" ]; then
-        for pid in $pids; do
-            if [ -f "/proc/$pid/io" ]; then
-                local rbytes=$(awk '/^read_bytes:/{print $2}' /proc/$pid/io 2>/dev/null)
-                local wbytes=$(awk '/^write_bytes:/{print $2}' /proc/$pid/io 2>/dev/null)
-                total=$((total + ${rbytes:-0} + ${wbytes:-0}))
-            fi
-        done
-    fi
+    [ -z "$pids" ] && echo "0" && return
     
-    # Method 2: If /proc/io gave 0, try conntrack
-    if [ "$total" -eq 0 ] && which conntrack >/dev/null 2>&1; then
-        # Get all SSH connections and sum bytes
-        # conntrack output has bytes= field
-        local conn_bytes=$(conntrack -L -p tcp --dport 22 2>/dev/null | \
-            awk -F'bytes=' '{for(i=2;i<=NF;i++){split($i,a," ");sum+=a[1]}} END{print sum+0}')
-        total=${conn_bytes:-0}
-    fi
-    
-    # Method 3: If still 0, try reading from /proc/net/dev differences
-    # (This would need baseline tracking, skip for now)
+    for pid in $pids; do
+        if [ -f "/proc/$pid/io" ]; then
+            # rchar = characters read (includes network data received)
+            # wchar = characters written (includes network data sent)
+            local rchar=$(awk '/^rchar:/{print $2}' /proc/$pid/io 2>/dev/null)
+            local wchar=$(awk '/^wchar:/{print $2}' /proc/$pid/io 2>/dev/null)
+            total=$((total + ${rchar:-0} + ${wchar:-0}))
+        fi
+    done
     
     echo "$total"
+}
+
+# Get session traffic - primary method
+get_session_traffic() {
+    local user=$1
+    get_proc_io_traffic "$user"
+}
+
+# Get accumulated traffic from nethogs (runs briefly to sample)
+# This is for real-time display
+get_realtime_traffic() {
+    local user=$1
+    
+    # Quick 1-second sample
+    local nh_output=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -i "$user" | tail -1)
+    
+    if [ -n "$nh_output" ]; then
+        local sent=$(echo "$nh_output" | awk '{print $(NF-1)}')
+        local recv=$(echo "$nh_output" | awk '{print $NF}')
+        echo "↑ ${sent:-0} KB/s  ↓ ${recv:-0} KB/s"
+    else
+        echo "No active session"
+    fi
 }
 
 # Debug function - call from menu to see what's happening
@@ -112,27 +131,34 @@ debug_traffic() {
     echo -e "\n${CYAN}=== Traffic Debug for $user ===${NC}"
     
     echo -e "\n${YELLOW}1. SSHD processes for user:${NC}"
-    pgrep -u "$user" sshd 2>/dev/null | while read pid; do
-        echo "  PID: $pid"
-        if [ -f "/proc/$pid/io" ]; then
-            echo "  /proc/$pid/io:"
-            cat /proc/$pid/io 2>/dev/null | sed 's/^/    /'
-        fi
-    done
+    local pids=$(pgrep -u "$user" sshd 2>/dev/null)
+    if [ -z "$pids" ]; then
+        echo "  No active sshd processes"
+    else
+        for pid in $pids; do
+            echo "  PID: $pid"
+            if [ -f "/proc/$pid/io" ]; then
+                echo "  /proc/$pid/io (rchar/wchar = network bytes):"
+                awk '/^rchar:|^wchar:|^read_bytes:|^write_bytes:/' /proc/$pid/io 2>/dev/null | sed 's/^/    /'
+            fi
+        done
+    fi
     
-    echo -e "\n${YELLOW}2. All processes for user:${NC}"
-    ps -u "$user" -o pid,comm,rss 2>/dev/null | head -10
+    echo -e "\n${YELLOW}2. Nethogs live rate (2 sec sample):${NC}"
+    timeout 3 nethogs -t -c 1 2>/dev/null | grep -i "$user" | tail -1 | sed 's/^/  /'
+    [ $? -ne 0 ] && echo "  No data captured"
     
-    echo -e "\n${YELLOW}3. Conntrack SSH connections:${NC}"
-    conntrack -L -p tcp --dport 22 2>/dev/null | head -5
+    echo -e "\n${YELLOW}3. Session traffic (from /proc/io):${NC}"
+    local session=$(get_proc_io_traffic "$user")
+    echo "  Current session: $(format_bytes $session)"
     
-    echo -e "\n${YELLOW}4. SS socket stats:${NC}"
-    ss -tnp 2>/dev/null | grep -E "ssh|:22" | head -5
+    echo -e "\n${YELLOW}4. Saved traffic:${NC}"
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+    echo "  Previously saved: $(format_bytes ${saved:-0})"
     
-    echo -e "\n${YELLOW}5. Current traffic calculation:${NC}"
-    local traffic=$(get_session_traffic "$user")
-    echo "  Raw bytes: $traffic"
-    echo "  Formatted: $(format_bytes $traffic)"
+    echo -e "\n${YELLOW}5. Total traffic:${NC}"
+    local total=$(get_traffic "$user")
+    echo "  Total (saved + session): $(format_bytes $total)"
     
     read -p "Press Enter to continue..."
 }
@@ -597,7 +623,7 @@ view_traffic() {
         return
     fi
     
-    printf "${BOLD}%-12s %-15s %-15s %-10s${NC}\n" "USER" "USED" "LIMIT" "STATUS"
+    printf "${BOLD}%-12s %-15s %-15s %-10s %-20s${NC}\n" "USER" "TOTAL" "LIMIT" "STATUS" "LIVE"
     line
     
     for user in "${users[@]}"; do
@@ -605,6 +631,12 @@ view_traffic() {
         local limit=$(get_limit "$user")
         local status="${GREEN}OK${NC}"
         local limit_str="Unlimited"
+        local live="offline"
+        
+        # Check if online and get real-time rate
+        if pgrep -u "$user" sshd >/dev/null 2>&1; then
+            live="${CYAN}online${NC}"
+        fi
         
         if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
             limit_str=$(format_bytes "$limit")
@@ -618,8 +650,11 @@ view_traffic() {
             fi
         fi
         
-        printf "%-12s %-15s %-15s %-10b\n" "$user" "$(format_bytes $traffic)" "$limit_str" "$status"
+        printf "%-12s %-15s %-15s %-10b %-20b\n" "$user" "$(format_bytes $traffic)" "$limit_str" "$status" "$live"
     done
+    
+    echo ""
+    echo -e "${YELLOW}Tip: Use option 9 (Debug traffic) for real-time speed monitoring${NC}"
     
     pause
 }
