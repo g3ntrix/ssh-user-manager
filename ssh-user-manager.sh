@@ -877,6 +877,11 @@ view_traffic() {
                 bar="$(printf '░%.0s' $(seq 1 20))"
             fi
             
+            # Save traffic for online users (so it's not lost if they disconnect)
+            if $is_online; then
+                save_traffic "$user"
+            fi
+            
             # Online indicator
             local online_dot=""
             if $is_online; then
@@ -903,10 +908,7 @@ view_traffic() {
         # Read with timeout for auto-refresh
         read -t 3 -n 1 -s key
         case "$key" in
-            q|Q) 
-                for u in "${users[@]}"; do save_traffic "$u"; done
-                break 
-                ;;
+            q|Q) break ;;
             r|R|'') ;;
         esac
     done
