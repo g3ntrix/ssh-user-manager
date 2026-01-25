@@ -28,15 +28,12 @@ fi
 # Initialize
 init() {
     mkdir -p "$CONFIG_DIR"
-    touch "$TRAFFIC_FILE" "$LIMITS_FILE"
+    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat"
     
-    # Check if xt_owner module is available
-    if ! lsmod | grep -q "xt_owner"; then
-        modprobe xt_owner 2>/dev/null
-    fi
+    # Ensure nethogs is installed
+    which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1
     
     # Setup rules for all existing users
-    # Note: owner match only works in OUTPUT chain
     for user in $(get_users); do
         setup_user_iptables "$user"
     done
@@ -309,35 +306,54 @@ create_user() {
     
     echo ""
     echo -e "${CYAN}Expiration:${NC}"
-    echo "  1. 7 days      4. 365 days"
-    echo "  2. 30 days     5. Custom"
-    echo "  3. 90 days     6. Never"
-    read -p "Choice [2]: " exp_choice
+    echo "  1. 1 hour      4. 7 days"
+    echo "  2. 6 hours     5. Custom"
+    echo "  3. 1 day       6. Never"
+    read -p "Choice [4]: " exp_choice
     
-    case ${exp_choice:-2} in
-        1) exp_days=7 ;;
-        2) exp_days=30 ;;
-        3) exp_days=90 ;;
-        4) exp_days=365 ;;
-        5) read -p "Days: " exp_days ;;
-        6) exp_days=0 ;;
-        *) exp_days=30 ;;
+    local exp_hours=0
+    case ${exp_choice:-4} in
+        1) exp_hours=1 ;;
+        2) exp_hours=6 ;;
+        3) exp_hours=24 ;;
+        4) exp_hours=$((7 * 24)) ;;
+        5) 
+            read -p "Enter duration (e.g., 2h, 3d, 1w): " custom_exp
+            case "$custom_exp" in
+                *h) exp_hours=${custom_exp%h} ;;
+                *d) exp_hours=$((${custom_exp%d} * 24)) ;;
+                *w) exp_hours=$((${custom_exp%w} * 24 * 7)) ;;
+                *) exp_hours=$custom_exp ;;
+            esac
+            ;;
+        6) exp_hours=0 ;;
+        *) exp_hours=$((7 * 24)) ;;
     esac
     
     echo ""
     echo -e "${CYAN}Traffic Limit:${NC}"
-    echo "  1. 5 GB        4. 100 GB"
-    echo "  2. 10 GB       5. Custom"
-    echo "  3. 50 GB       6. Unlimited"
-    read -p "Choice [6]: " lim_choice
+    echo "  1. 100 MB      5. 5 GB"
+    echo "  2. 500 MB      6. 10 GB"
+    echo "  3. 1 GB        7. Custom"
+    echo "  4. 2 GB        8. Unlimited"
+    read -p "Choice [8]: " lim_choice
     
-    case ${lim_choice:-6} in
-        1) limit=$((5 * 1073741824)) ;;
-        2) limit=$((10 * 1073741824)) ;;
-        3) limit=$((50 * 1073741824)) ;;
-        4) limit=$((100 * 1073741824)) ;;
-        5) read -p "Limit in GB: " gb; limit=$((gb * 1073741824)) ;;
-        6) limit=0 ;;
+    case ${lim_choice:-8} in
+        1) limit=$((100 * 1048576)) ;;
+        2) limit=$((500 * 1048576)) ;;
+        3) limit=$((1 * 1073741824)) ;;
+        4) limit=$((2 * 1073741824)) ;;
+        5) limit=$((5 * 1073741824)) ;;
+        6) limit=$((10 * 1073741824)) ;;
+        7) 
+            read -p "Enter limit (e.g., 500m, 2g): " custom_lim
+            case "$custom_lim" in
+                *m|*M) limit=$((${custom_lim%[mM]} * 1048576)) ;;
+                *g|*G) limit=$((${custom_lim%[gG]} * 1073741824)) ;;
+                *) limit=$((custom_lim * 1073741824)) ;;
+            esac
+            ;;
+        8) limit=0 ;;
         *) limit=0 ;;
     esac
     
@@ -361,8 +377,12 @@ create_user() {
     fi
     
     # Set expiry
-    if [ "$exp_days" -gt 0 ]; then
-        chage -E "$(days_to_date $exp_days)" "$username"
+    if [ "$exp_hours" -gt 0 ]; then
+        local exp_date=$(date -d "+$exp_hours hours" +%Y-%m-%d)
+        local exp_datetime=$(date -d "+$exp_hours hours" "+%Y-%m-%d %H:%M")
+        chage -E "$exp_date" "$username"
+        # Store exact expiry time for display
+        echo "$username:$(date -d "+$exp_hours hours" +%s)" >> "$CONFIG_DIR/expiry_times.dat"
     fi
     
     # Set traffic limit
@@ -376,7 +396,15 @@ create_user() {
     
     echo ""
     echo -e "${GREEN}✓ User '$username' created successfully${NC}"
-    [ "$exp_days" -gt 0 ] && echo -e "  Expires: $(days_to_date $exp_days)"
+    if [ "$exp_hours" -gt 0 ]; then
+        if [ "$exp_hours" -lt 24 ]; then
+            echo -e "  Expires in: ${exp_hours} hour(s)"
+        else
+            echo -e "  Expires in: $((exp_hours / 24)) day(s)"
+        fi
+    else
+        echo -e "  Expires: Never"
+    fi
     [ "$limit" -gt 0 ] && echo -e "  Traffic limit: $(format_bytes $limit)" || echo -e "  Traffic: Unlimited"
     
     pause
@@ -609,54 +637,100 @@ manage_traffic() {
     pause
 }
 
-view_traffic() {
-    header
-    echo -e "${CYAN}📈 Traffic Usage${NC}"
-    line
-    echo ""
+# Get real-time speed from nethogs for a user
+get_user_speed() {
+    local user=$1
+    local nh_line=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -i "$user" | tail -1)
     
+    if [ -n "$nh_line" ]; then
+        local sent=$(echo "$nh_line" | awk '{print $(NF-1)}')
+        local recv=$(echo "$nh_line" | awk '{print $NF}')
+        echo "${sent:-0}|${recv:-0}"
+    else
+        echo "0|0"
+    fi
+}
+
+# Real-time traffic monitor
+view_traffic() {
     local users=($(get_users))
     
     if [ ${#users[@]} -eq 0 ]; then
+        header
         echo -e "${YELLOW}No users found${NC}"
         pause
         return
     fi
     
-    printf "${BOLD}%-12s %-15s %-15s %-10s %-20s${NC}\n" "USER" "TOTAL" "LIMIT" "STATUS" "LIVE"
-    line
-    
-    for user in "${users[@]}"; do
-        local traffic=$(get_traffic "$user")
-        local limit=$(get_limit "$user")
-        local status="${GREEN}OK${NC}"
-        local limit_str="Unlimited"
-        local live="offline"
+    # Loop until user presses q
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}"
+        echo "  ╔═══════════════════════════════════════════════════════════════════════╗"
+        echo "  ║                    📊 REAL-TIME TRAFFIC MONITOR                       ║"
+        echo "  ╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        printf "  ${BOLD}%-10s │ %-10s │ %-10s │ %-12s │ %-10s │ %-8s${NC}\n" "USER" "↑ UP" "↓ DOWN" "TOTAL" "LIMIT" "STATUS"
+        echo "  ──────────┼────────────┼────────────┼──────────────┼────────────┼─────────"
         
-        # Check if online and get real-time rate
-        if pgrep -u "$user" sshd >/dev/null 2>&1; then
-            live="${CYAN}online${NC}"
-        fi
-        
-        if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
-            limit_str=$(format_bytes "$limit")
-            local pct=$((traffic * 100 / limit))
-            if [ $traffic -ge $limit ]; then
-                status="${RED}EXCEEDED${NC}"
-            elif [ $pct -ge 90 ]; then
-                status="${YELLOW}${pct}%${NC}"
+        for user in "${users[@]}"; do
+            local traffic=$(get_traffic "$user")
+            local limit=$(get_limit "$user")
+            local status="${GREEN}OK${NC}"
+            local limit_str="∞"
+            local up="-"
+            local down="-"
+            
+            # Check if online
+            if pgrep -u "$user" sshd >/dev/null 2>&1; then
+                # Get speed from nethogs (quick sample)
+                local speed_data=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -i "$user" | tail -1)
+                if [ -n "$speed_data" ]; then
+                    up=$(echo "$speed_data" | awk '{printf "%.1f KB/s", $(NF-1)}')
+                    down=$(echo "$speed_data" | awk '{printf "%.1f KB/s", $NF}')
+                else
+                    up="${CYAN}online${NC}"
+                    down="-"
+                fi
             else
-                status="${GREEN}${pct}%${NC}"
+                up="${YELLOW}offline${NC}"
             fi
-        fi
+            
+            if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
+                limit_str=$(format_bytes "$limit")
+                if [ $traffic -ge $limit ]; then
+                    status="${RED}OVER${NC}"
+                else
+                    local pct=$((traffic * 100 / limit))
+                    if [ $pct -ge 90 ]; then
+                        status="${YELLOW}${pct}%${NC}"
+                    else
+                        status="${GREEN}${pct}%${NC}"
+                    fi
+                fi
+            fi
+            
+            printf "  %-10s │ %-18b │ %-18b │ %-12s │ %-10s │ %-8b\n" \
+                "$user" "$up" "$down" "$(format_bytes $traffic)" "$limit_str" "$status"
+        done
         
-        printf "%-12s %-15s %-15s %-10b %-20b\n" "$user" "$(format_bytes $traffic)" "$limit_str" "$status" "$live"
+        echo ""
+        echo "  ──────────────────────────────────────────────────────────────────────────"
+        echo -e "  ${CYAN}[R]${NC} Refresh   ${CYAN}[S]${NC} Save traffic   ${CYAN}[Q]${NC} Back to menu"
+        echo ""
+        
+        # Read with timeout for auto-refresh feel, or wait for keypress
+        read -t 5 -n 1 -s key
+        case "$key" in
+            q|Q) break ;;
+            s|S) 
+                for u in "${users[@]}"; do save_traffic "$u"; done
+                echo -e "  ${GREEN}Traffic saved!${NC}"
+                sleep 1
+                ;;
+            r|R|'') ;; # Refresh
+        esac
     done
-    
-    echo ""
-    echo -e "${YELLOW}Tip: Use option 9 (Debug traffic) for real-time speed monitoring${NC}"
-    
-    pause
 }
 
 #═══════════════════════════════════════════════════════════════════
@@ -678,8 +752,7 @@ main_menu() {
         echo -e "    ${CYAN}6${NC}. Manage expiration"
         echo ""
         echo -e "  ${BOLD}TRAFFIC${NC}"
-        echo -e "    ${CYAN}7${NC}. View traffic       ${CYAN}8${NC}. Manage limits"
-        echo -e "    ${CYAN}9${NC}. Debug traffic"
+        echo -e "    ${CYAN}7${NC}. Traffic Monitor    ${CYAN}8${NC}. Manage limits"
         echo ""
         line
         echo -e "    ${CYAN}0${NC}. Exit"
@@ -696,12 +769,6 @@ main_menu() {
             6) manage_expiry ;;
             7) view_traffic ;;
             8) manage_traffic ;;
-            9) 
-                header
-                echo "Select user to debug:"
-                select_user
-                [ -n "$SELECTED_USER" ] && debug_traffic "$SELECTED_USER"
-                ;;
             0)
                 # Save traffic before exit
                 for u in $(get_users); do save_traffic "$u"; done
