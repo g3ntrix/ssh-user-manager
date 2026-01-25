@@ -66,51 +66,52 @@ days_to_date() {
     date -d "+$1 days" +%Y-%m-%d
 }
 
-# Setup iptables rules for a user
+# Setup traffic tracking for a user
 setup_user_iptables() {
     local user=$1
-    local uid=$(id -u "$user" 2>/dev/null)
-    [ -z "$uid" ] && return
-    
-    # Remove old rules from OUTPUT chain
-    while iptables -D OUTPUT -m owner --uid-owner "$uid" -m comment --comment "traffic:$user" 2>/dev/null; do :; done
-    
-    # Add accounting rule in OUTPUT chain (owner match only works here)
-    iptables -A OUTPUT -m owner --uid-owner "$uid" -m comment --comment "traffic:$user" 2>/dev/null
+    # Just ensure user tracking file exists
+    touch "$CONFIG_DIR/session_$user.dat" 2>/dev/null
 }
 
-# Get iptables traffic for user
-get_iptables_traffic() {
+# Get live session traffic for user using /proc/[pid]/io
+# This reads actual I/O bytes from sshd processes running as the user
+get_session_traffic() {
     local user=$1
-    local uid=$(id -u "$user" 2>/dev/null)
-    [ -z "$uid" ] && echo "0" && return
+    local total=0
     
-    # Get bytes from OUTPUT chain with exact count (-x flag)
-    local bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null | grep "traffic:$user" | awk '{print $2}')
-    echo "${bytes:-0}"
+    # Find all sshd processes for this user
+    local pids=$(pgrep -u "$user" sshd 2>/dev/null)
+    [ -z "$pids" ] && echo "0" && return
+    
+    for pid in $pids; do
+        if [ -f "/proc/$pid/io" ]; then
+            # read_bytes + write_bytes from /proc/[pid]/io
+            local rbytes=$(grep "^read_bytes:" /proc/$pid/io 2>/dev/null | awk '{print $2}')
+            local wbytes=$(grep "^write_bytes:" /proc/$pid/io 2>/dev/null | awk '{print $2}')
+            total=$((total + ${rbytes:-0} + ${wbytes:-0}))
+        fi
+    done
+    
+    echo "$total"
 }
 
-# Get total traffic (saved + current)
+# Get total traffic (saved + current session)
 get_traffic() {
     local user=$1
     local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
-    local current=$(get_iptables_traffic "$user")
+    local current=$(get_session_traffic "$user")
     echo $((${saved:-0} + ${current:-0}))
 }
 
-# Save and reset traffic counter
+# Save traffic counter (accumulates session data)
 save_traffic() {
     local user=$1
-    local current=$(get_iptables_traffic "$user")
+    local current=$(get_session_traffic "$user")
     local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
     local total=$((${saved:-0} + ${current:-0}))
     
     sed -i "/^$user:/d" "$TRAFFIC_FILE"
     echo "$user:$total" >> "$TRAFFIC_FILE"
-    
-    # Reset iptables counter
-    local uid=$(id -u "$user" 2>/dev/null)
-    [ -n "$uid" ] && iptables -Z SSH_TRAFFIC 2>/dev/null
 }
 
 # Reset traffic for user
@@ -118,9 +119,6 @@ reset_traffic() {
     local user=$1
     sed -i "/^$user:/d" "$TRAFFIC_FILE"
     echo "$user:0" >> "$TRAFFIC_FILE"
-    
-    local uid=$(id -u "$user" 2>/dev/null)
-    [ -n "$uid" ] && iptables -Z SSH_TRAFFIC 2>/dev/null
 }
 
 # Get/Set traffic limit
