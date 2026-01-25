@@ -572,25 +572,43 @@ manage_expiry() {
     echo -e "Current: ${CYAN}$current${NC}"
     echo ""
     
-    echo "1. Add 7 days       5. Custom days"
-    echo "2. Add 30 days      6. Remove expiration"
-    echo "3. Add 90 days      7. Deactivate now"
-    echo "4. Add 365 days     0. Cancel"
+    echo "1. Add 1 hour       5. Add 7 days"
+    echo "2. Add 6 hours      6. Custom"
+    echo "3. Add 1 day        7. Remove expiration"
+    echo "4. Add 3 days       8. Deactivate now"
+    echo ""  
+    echo "0. Cancel"
     echo ""
     read -p "Choice: " choice
     
+    local exp_hours=0
     case $choice in
-        1) chage -E "$(days_to_date 7)" "$SELECTED_USER" ;;
-        2) chage -E "$(days_to_date 30)" "$SELECTED_USER" ;;
-        3) chage -E "$(days_to_date 90)" "$SELECTED_USER" ;;
-        4) chage -E "$(days_to_date 365)" "$SELECTED_USER" ;;
-        5) read -p "Days: " d; chage -E "$(days_to_date $d)" "$SELECTED_USER" ;;
-        6) chage -E -1 "$SELECTED_USER" ;;
-        7) chage -E 0 "$SELECTED_USER"; kill_user_sessions "$SELECTED_USER" ;;
+        1) exp_hours=1 ;;
+        2) exp_hours=6 ;;
+        3) exp_hours=24 ;;
+        4) exp_hours=$((3 * 24)) ;;
+        5) exp_hours=$((7 * 24)) ;;
+        6) 
+            read -p "Enter duration (e.g., 2h, 3d, 1w): " custom_exp
+            case "$custom_exp" in
+                *h) exp_hours=${custom_exp%h} ;;
+                *d) exp_hours=$((${custom_exp%d} * 24)) ;;
+                *w) exp_hours=$((${custom_exp%w} * 24 * 7)) ;;
+                *) exp_hours=$custom_exp ;;
+            esac
+            ;;
+        7) chage -E -1 "$SELECTED_USER"; echo -e "${GREEN}✓ Expiration removed${NC}"; pause; return ;;
+        8) chage -E 0 "$SELECTED_USER"; kill_user_sessions "$SELECTED_USER"; echo -e "${RED}✓ User deactivated${NC}"; pause; return ;;
         0) return ;;
     esac
     
-    echo -e "${GREEN}✓ Updated. New expiry: $(get_expiry $SELECTED_USER)${NC}"
+    if [ "$exp_hours" -gt 0 ]; then
+        local exp_date=$(date -d "+$exp_hours hours" +%Y-%m-%d)
+        chage -E "$exp_date" "$SELECTED_USER"
+        echo -e "${GREEN}✓ Extended by $exp_hours hour(s)${NC}"
+        echo -e "  New expiry: $(get_expiry $SELECTED_USER)"
+    fi
+    
     pause
 }
 
@@ -615,25 +633,41 @@ manage_traffic() {
     [ -n "$limit" ] && [ "$limit" -gt 0 ] && echo -e "Limit: $(format_bytes $limit)" || echo "Limit: Unlimited"
     echo ""
     
-    echo "1. Set limit 5 GB      5. Custom limit"
-    echo "2. Set limit 10 GB     6. Remove limit"
-    echo "3. Set limit 50 GB     7. Reset usage"
-    echo "4. Set limit 100 GB    0. Cancel"
+    echo "1. Set 100 MB       5. Set 5 GB"
+    echo "2. Set 500 MB       6. Set 10 GB"
+    echo "3. Set 1 GB         7. Custom"
+    echo "4. Set 2 GB         8. Remove limit"
+    echo ""
+    echo "9. Reset usage      0. Cancel"
     echo ""
     read -p "Choice: " choice
     
+    local new_limit=0
     case $choice in
-        1) set_limit "$SELECTED_USER" $((5 * 1073741824)) ;;
-        2) set_limit "$SELECTED_USER" $((10 * 1073741824)) ;;
-        3) set_limit "$SELECTED_USER" $((50 * 1073741824)) ;;
-        4) set_limit "$SELECTED_USER" $((100 * 1073741824)) ;;
-        5) read -p "Limit in GB: " gb; set_limit "$SELECTED_USER" $((gb * 1073741824)) ;;
-        6) set_limit "$SELECTED_USER" 0 ;;
-        7) reset_traffic "$SELECTED_USER"; echo -e "${GREEN}✓ Traffic reset${NC}"; pause; return ;;
+        1) new_limit=$((100 * 1048576)) ;;
+        2) new_limit=$((500 * 1048576)) ;;
+        3) new_limit=$((1 * 1073741824)) ;;
+        4) new_limit=$((2 * 1073741824)) ;;
+        5) new_limit=$((5 * 1073741824)) ;;
+        6) new_limit=$((10 * 1073741824)) ;;
+        7) 
+            read -p "Enter limit (e.g., 500m, 2g): " custom_lim
+            case "$custom_lim" in
+                *m|*M) new_limit=$(awk "BEGIN {printf \"%.0f\", ${custom_lim%[mM]} * 1048576}") ;;
+                *g|*G) new_limit=$(awk "BEGIN {printf \"%.0f\", ${custom_lim%[gG]} * 1073741824}") ;;
+                *) new_limit=$(awk "BEGIN {printf \"%.0f\", $custom_lim * 1073741824}") ;;
+            esac
+            ;;
+        8) new_limit=0; set_limit "$SELECTED_USER" 0; echo -e "${GREEN}✓ Limit removed${NC}"; pause; return ;;
+        9) reset_traffic "$SELECTED_USER"; echo -e "${GREEN}✓ Traffic reset${NC}"; pause; return ;;
         0) return ;;
     esac
     
-    echo -e "${GREEN}✓ Limit updated${NC}"
+    if [ "$new_limit" -gt 0 ]; then
+        set_limit "$SELECTED_USER" "$new_limit"
+        echo -e "${GREEN}✓ Limit set to $(format_bytes $new_limit)${NC}"
+    fi
+    
     pause
 }
 
