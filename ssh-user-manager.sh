@@ -811,19 +811,35 @@ view_traffic() {
             local up="-"
             local down="-"
             
-            # Check if online
+            # Check if online and get speed
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
-                # Get speed from nethogs (quick sample)
-                local speed_data=$(timeout 2 nethogs -t -c 1 2>/dev/null | grep -i "$user" | tail -1)
+                # Get speed from nethogs - run for 3 cycles to get accurate reading
+                local speed_data=$(timeout 4 nethogs -t -c 3 2>/dev/null | grep -i "sshd.*$user" | tail -1)
+                
                 if [ -n "$speed_data" ]; then
-                    up=$(echo "$speed_data" | awk '{printf "%.1f KB/s", $(NF-1)}')
-                    down=$(echo "$speed_data" | awk '{printf "%.1f KB/s", $NF}')
+                    # nethogs format: program/pid/user  sent  received
+                    local sent=$(echo "$speed_data" | awk '{print $(NF-1)}')
+                    local recv=$(echo "$speed_data" | awk '{print $NF}')
+                    
+                    # Format with color based on activity
+                    if [ "$(echo "$sent > 0.1" | bc -l 2>/dev/null)" = "1" ] 2>/dev/null || [ "${sent%.*}" -gt 0 ] 2>/dev/null; then
+                        up="${GREEN}${sent} KB/s${NC}"
+                    else
+                        up="${sent} KB/s"
+                    fi
+                    
+                    if [ "$(echo "$recv > 0.1" | bc -l 2>/dev/null)" = "1" ] 2>/dev/null || [ "${recv%.*}" -gt 0 ] 2>/dev/null; then
+                        down="${GREEN}${recv} KB/s${NC}"
+                    else
+                        down="${recv} KB/s"
+                    fi
                 else
-                    up="${CYAN}online${NC}"
+                    up="${CYAN}idle${NC}"
                     down="-"
                 fi
             else
                 up="${YELLOW}offline${NC}"
+                down="-"
             fi
             
             if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
@@ -863,17 +879,16 @@ view_traffic() {
         
         echo ""
         echo "  ──────────────────────────────────────────────────────────────────────────"
-        echo -e "  ${CYAN}[R]${NC} Refresh   ${CYAN}[S]${NC} Save traffic   ${CYAN}[Q]${NC} Back to menu"
+        echo -e "  ${CYAN}[R]${NC} Refresh   ${CYAN}[Q]${NC} Back to menu"
         echo ""
         
-        # Read with timeout for auto-refresh feel, or wait for keypress
-        read -t 5 -n 1 -s key
+        # Read with timeout for auto-refresh, or wait for keypress
+        read -t 3 -n 1 -s key
         case "$key" in
-            q|Q) break ;;
-            s|S) 
+            q|Q) 
+                # Save all traffic before leaving
                 for u in "${users[@]}"; do save_traffic "$u"; done
-                echo -e "  ${GREEN}Traffic saved!${NC}"
-                sleep 1
+                break 
                 ;;
             r|R|'') ;; # Refresh
         esac
