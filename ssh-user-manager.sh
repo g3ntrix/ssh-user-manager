@@ -231,20 +231,18 @@ get_traffic_usage() {
         return
     fi
     
-    # Get bytes from iptables OUTPUT chain for this user
-    local bytes=$(iptables -L OUTPUT -v -n 2>/dev/null | grep "owner UID match $uid" | awk '{print $2}')
+    # Get bytes from iptables OUTPUT chain for this user (use -x for exact bytes)
+    local bytes=$(iptables -L OUTPUT -v -n -x 2>/dev/null | grep "owner UID match $uid" | awk '{print $2}')
     
-    if [ -z "$bytes" ]; then
-        bytes=0
-    fi
-    
-    # Convert K, M, G suffixes to bytes
-    if [[ "$bytes" == *K ]]; then
-        bytes=$(echo "$bytes" | sed 's/K//' | awk '{printf "%.0f", $1 * 1024}')
-    elif [[ "$bytes" == *M ]]; then
-        bytes=$(echo "$bytes" | sed 's/M//' | awk '{printf "%.0f", $1 * 1048576}')
-    elif [[ "$bytes" == *G ]]; then
-        bytes=$(echo "$bytes" | sed 's/G//' | awk '{printf "%.0f", $1 * 1073741824}')
+    # If iptables shows nothing, try to get from saved data
+    if [ -z "$bytes" ] || [ "$bytes" = "0" ]; then
+        # Check if we have saved usage data
+        local saved_usage=$(grep "^$username:" "$TRAFFIC_LOG" 2>/dev/null | cut -d: -f2)
+        if [ -n "$saved_usage" ]; then
+            bytes=$saved_usage
+        else
+            bytes=0
+        fi
     fi
     
     echo "$bytes"
@@ -254,11 +252,20 @@ get_traffic_usage() {
 format_bytes() {
     local bytes=$1
     if [ "$bytes" -ge 1073741824 ]; then
-        echo "$(echo "scale=2; $bytes / 1073741824" | bc) GB"
+        local gb=$((bytes / 1073741824))
+        local remainder=$((bytes % 1073741824))
+        local decimal=$((remainder * 100 / 1073741824))
+        printf "%d.%02d GB" "$gb" "$decimal"
     elif [ "$bytes" -ge 1048576 ]; then
-        echo "$(echo "scale=2; $bytes / 1048576" | bc) MB"
+        local mb=$((bytes / 1048576))
+        local remainder=$((bytes % 1048576))
+        local decimal=$((remainder * 100 / 1048576))
+        printf "%d.%02d MB" "$mb" "$decimal"
     elif [ "$bytes" -ge 1024 ]; then
-        echo "$(echo "scale=2; $bytes / 1024" | bc) KB"
+        local kb=$((bytes / 1024))
+        local remainder=$((bytes % 1024))
+        local decimal=$((remainder * 100 / 1024))
+        printf "%d.%02d KB" "$kb" "$decimal"
     else
         echo "$bytes B"
     fi
@@ -367,7 +374,7 @@ list_users() {
         traffic_info=$(grep "^$username:" "$TRAFFIC_FILE" 2>/dev/null)
         if [ -n "$traffic_info" ]; then
             traffic_limit=$(echo "$traffic_info" | cut -d: -f2)
-            if [ "$traffic_limit" -gt 0 ]; then
+            if [ -n "$traffic_limit" ] && [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
                 traffic_limit_fmt=$(format_bytes "$traffic_limit")
             else
                 traffic_limit_fmt="Unlimited"
@@ -707,19 +714,21 @@ view_traffic() {
         traffic_info=$(grep "^$username:" "$TRAFFIC_FILE" 2>/dev/null)
         if [ -n "$traffic_info" ]; then
             traffic_limit=$(echo "$traffic_info" | cut -d: -f2)
-            if [ "$traffic_limit" -gt 0 ]; then
+            if [ -n "$traffic_limit" ] && [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
                 traffic_limit_fmt=$(format_bytes "$traffic_limit")
                 
                 # Calculate percentage and status
-                if [ "$traffic_used" -ge "$traffic_limit" ]; then
+                if [ "$traffic_used" -ge "$traffic_limit" ] 2>/dev/null; then
                     status="${RED}EXCEEDED${NC}"
-                else
+                elif [ "$traffic_limit" -gt 0 ] 2>/dev/null; then
                     percent=$((traffic_used * 100 / traffic_limit))
                     if [ "$percent" -ge 90 ]; then
                         status="${YELLOW}${percent}%${NC}"
                     else
                         status="${GREEN}${percent}%${NC}"
                     fi
+                else
+                    status="${GREEN}OK${NC}"
                 fi
             else
                 traffic_limit_fmt="Unlimited"
