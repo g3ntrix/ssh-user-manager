@@ -190,18 +190,24 @@ get_traffic() {
 # Save traffic: add session traffic to saved total and update baseline
 save_traffic() {
     local user=$1
-    local session=$(get_session_traffic "$user")
-    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
     local raw=$(get_proc_io_raw "$user")
     
-    # Add session traffic to saved total
-    local new_total=$((${saved:-0} + ${session:-0}))
-    
-    sed -i "/^$user:/d" "$TRAFFIC_FILE"
-    echo "$user:$new_total" >> "$TRAFFIC_FILE"
-    
-    # Update baseline to current raw value so we don't double-count
-    set_baseline "$user" "$raw"
+    # Only save if user has an active session with traffic
+    if [ "$raw" -gt 0 ]; then
+        local session=$(get_session_traffic "$user")
+        local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+        
+        # Only add if there's actual new session traffic
+        if [ "$session" -gt 0 ]; then
+            local new_total=$((${saved:-0} + session))
+            sed -i "/^$user:/d" "$TRAFFIC_FILE"
+            echo "$user:$new_total" >> "$TRAFFIC_FILE"
+            
+            # Update baseline to current raw value so we don't double-count
+            set_baseline "$user" "$raw"
+        fi
+    fi
+    # If user is offline (raw=0), don't touch baseline or saved traffic
 }
 
 # Reset traffic for user (also resets baseline and unlocks if locked)
@@ -814,15 +820,17 @@ view_traffic() {
             local is_online=false
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
                 is_online=true
-                # Search for user in nethogs output (try different patterns)
-                local speed_line=$(echo "$nh_data" | grep -E "sshd.*$user|$user" | grep -v "^$" | tail -1)
+                # Search for user in nethogs output - nethogs shows "program/PID/user"
+                # Try multiple patterns: exact user match, sshd-session with user
+                local speed_line=$(echo "$nh_data" | grep -E "/$user\s|$user\s" | tail -1)
                 
                 if [ -n "$speed_line" ]; then
                     local sent=$(echo "$speed_line" | awk '{printf "%.1f", $(NF-1)}')
                     local recv=$(echo "$speed_line" | awk '{printf "%.1f", $NF}')
                     speed_info="↑${sent} ↓${recv} KB/s"
                 else
-                    speed_info="↑0.0 ↓0.0 KB/s"
+                    # No nethogs data but user is online
+                    speed_info="↑- ↓- KB/s"
                 fi
             fi
             
