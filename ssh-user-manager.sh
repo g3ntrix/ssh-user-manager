@@ -63,16 +63,24 @@ create_user() {
     useradd -m -s /bin/bash "$username"
     
     if [ $? -eq 0 ]; then
-        # Set password using chpasswd (more reliable than passwd)
-        echo "$username:$password" | chpasswd
+        # Set password using echo piped to passwd (bypasses some PAM checks)
+        echo -e "$password\n$password" | passwd "$username" >/dev/null 2>&1
         
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}User '$username' created successfully with password${NC}"
             echo -e "${YELLOW}User can now connect via SSH${NC}"
         else
             echo -e "${RED}User created but failed to set password${NC}"
-            # Clean up the user if password setting failed
-            userdel -r "$username" 2>/dev/null
+            echo -e "${YELLOW}Attempting alternative method...${NC}"
+            # Try chpasswd as fallback
+            echo "$username:$password" | chpasswd 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}Password set successfully using alternative method${NC}"
+            else
+                # Clean up the user if password setting failed
+                userdel -r "$username" 2>/dev/null
+                echo -e "${RED}Failed to set password. User removed.${NC}"
+            fi
         fi
     else
         echo -e "${RED}Failed to create user${NC}"
@@ -220,13 +228,19 @@ change_password() {
         return
     fi
     
-    # Set password using chpasswd
-    echo "$username:$password" | chpasswd
+    # Set password using echo piped to passwd
+    echo -e "$password\n$password" | passwd "$username" >/dev/null 2>&1
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Password changed successfully for '$username'${NC}"
     else
-        echo -e "${RED}Failed to change password${NC}"
+        echo -e "${YELLOW}Attempting alternative method...${NC}"
+        echo "$username:$password" | chpasswd 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}Password changed successfully${NC}"
+        else
+            echo -e "${RED}Failed to change password${NC}"
+        fi
     fi
     
     read -p "Press Enter to continue..."
