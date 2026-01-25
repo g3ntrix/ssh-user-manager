@@ -794,14 +794,17 @@ view_traffic() {
     
     # Loop until user presses q
     while true; do
+        # Get nethogs data ONCE for all users (faster)
+        local nh_data=$(timeout 2 nethogs -t -c 1 2>/dev/null)
+        
         clear
         echo -e "${BOLD}${CYAN}"
         echo "  ╔═══════════════════════════════════════════════════════════════════════╗"
         echo "  ║                    📊 REAL-TIME TRAFFIC MONITOR                       ║"
         echo "  ╚═══════════════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        printf "  ${BOLD}%-10s │ %-10s │ %-10s │ %-12s │ %-10s │ %-8s${NC}\n" "USER" "↑ UP" "↓ DOWN" "TOTAL" "LIMIT" "STATUS"
-        echo "  ──────────┼────────────┼────────────┼──────────────┼────────────┼─────────"
+        printf "  ${BOLD}%-10s │ %-12s │ %-12s │ %-12s │ %-10s │ %-8s${NC}\n" "USER" "↑ UP" "↓ DOWN" "TOTAL" "LIMIT" "STATUS"
+        echo "  ──────────┼──────────────┼──────────────┼──────────────┼────────────┼─────────"
         
         for user in "${users[@]}"; do
             local traffic=$(get_traffic "$user")
@@ -811,28 +814,15 @@ view_traffic() {
             local up="-"
             local down="-"
             
-            # Check if online and get speed
+            # Check if online and get speed from cached nethogs data
             if pgrep -u "$user" sshd >/dev/null 2>&1; then
-                # Get speed from nethogs - run for 3 cycles to get accurate reading
-                local speed_data=$(timeout 4 nethogs -t -c 3 2>/dev/null | grep -i "sshd.*$user" | tail -1)
+                local speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
                 
-                if [ -n "$speed_data" ]; then
-                    # nethogs format: program/pid/user  sent  received
-                    local sent=$(echo "$speed_data" | awk '{print $(NF-1)}')
-                    local recv=$(echo "$speed_data" | awk '{print $NF}')
-                    
-                    # Format with color based on activity
-                    if [ "$(echo "$sent > 0.1" | bc -l 2>/dev/null)" = "1" ] 2>/dev/null || [ "${sent%.*}" -gt 0 ] 2>/dev/null; then
-                        up="${GREEN}${sent} KB/s${NC}"
-                    else
-                        up="${sent} KB/s"
-                    fi
-                    
-                    if [ "$(echo "$recv > 0.1" | bc -l 2>/dev/null)" = "1" ] 2>/dev/null || [ "${recv%.*}" -gt 0 ] 2>/dev/null; then
-                        down="${GREEN}${recv} KB/s${NC}"
-                    else
-                        down="${recv} KB/s"
-                    fi
+                if [ -n "$speed_line" ]; then
+                    local sent=$(echo "$speed_line" | awk '{printf "%.1f", $(NF-1)}')
+                    local recv=$(echo "$speed_line" | awk '{printf "%.1f", $NF}')
+                    up="${sent} KB/s"
+                    down="${recv} KB/s"
                 else
                     up="${CYAN}idle${NC}"
                     down="-"
