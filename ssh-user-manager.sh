@@ -49,11 +49,21 @@ get_users() {
 # Format bytes
 format_bytes() {
     local b=$1
-    if [ "$b" -ge 1073741824 ]; then
+    # Clean and validate input
+    b=$(echo "$b" | tr -d '\n \t')
+    b=${b:-0}
+    
+    # Validate it's a number
+    if ! [[ "$b" =~ ^[0-9]+$ ]]; then
+        echo "0 B"
+        return
+    fi
+    
+    if [ "$b" -ge 1073741824 ] 2>/dev/null; then
         printf "%.2f GB" "$(awk "BEGIN {printf \"%.2f\", $b/1073741824}")"
-    elif [ "$b" -ge 1048576 ]; then
+    elif [ "$b" -ge 1048576 ] 2>/dev/null; then
         printf "%.2f MB" "$(awk "BEGIN {printf \"%.2f\", $b/1048576}")"
-    elif [ "$b" -ge 1024 ]; then
+    elif [ "$b" -ge 1024 ] 2>/dev/null; then
         printf "%.2f KB" "$(awk "BEGIN {printf \"%.2f\", $b/1024}")"
     else
         echo "$b B"
@@ -82,14 +92,20 @@ get_proc_io_raw() {
     local total=0
     
     # Get all PIDs for user's session processes
-    local pids=$(pgrep -u "$user" 'sshd|sshd-session|bash|sh' 2>/dev/null)
+    local pids=$(pgrep -u "$user" 'sshd|sshd-session|bash|sh' 2>/dev/null | tr '\n' ' ')
     [ -z "$pids" ] && echo "0" && return
     
     for pid in $pids; do
         if [ -f "/proc/$pid/io" ]; then
-            local rchar=$(awk '/^rchar:/{print $2}' /proc/$pid/io 2>/dev/null)
-            local wchar=$(awk '/^wchar:/{print $2}' /proc/$pid/io 2>/dev/null)
-            total=$((total + ${rchar:-0} + ${wchar:-0}))
+            local rchar=$(awk '/^rchar:/{print $2}' /proc/$pid/io 2>/dev/null | tr -d '\n')
+            local wchar=$(awk '/^wchar:/{print $2}' /proc/$pid/io 2>/dev/null | tr -d '\n')
+            # Validate integers
+            rchar=${rchar:-0}
+            wchar=${wchar:-0}
+            # Strip any whitespace
+            rchar=$(echo "$rchar" | tr -d ' \t\n')
+            wchar=$(echo "$wchar" | tr -d ' \t\n')
+            total=$((total + rchar + wchar))
         fi
     done
     
@@ -99,7 +115,8 @@ get_proc_io_raw() {
 # Get baseline (already counted traffic) for user
 get_baseline() {
     local user=$1
-    grep "^$user:" "$BASELINE_FILE" 2>/dev/null | cut -d: -f2
+    local baseline=$(grep "^$user:" "$BASELINE_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    echo "${baseline:-0}"
 }
 
 # Set baseline for user
@@ -116,14 +133,20 @@ get_session_traffic() {
     local raw=$(get_proc_io_raw "$user")
     local baseline=$(get_baseline "$user")
     
+    # Clean and validate values
+    raw=$(echo "$raw" | tr -d '\n \t')
+    baseline=$(echo "$baseline" | tr -d '\n \t')
+    raw=${raw:-0}
+    baseline=${baseline:-0}
+    
     # If no active session, return 0
-    [ "$raw" -eq 0 ] && echo "0" && return
+    [ "$raw" -eq 0 ] 2>/dev/null && echo "0" && return
     
     # If baseline is higher than raw, session restarted - use raw as new traffic
-    if [ "${baseline:-0}" -gt "$raw" ]; then
+    if [ "$baseline" -gt "$raw" ] 2>/dev/null; then
         echo "$raw"
     else
-        echo $((raw - ${baseline:-0}))
+        echo $((raw - baseline))
     fi
 }
 
@@ -171,7 +194,7 @@ debug_traffic() {
     echo "  Current session: $(format_bytes $session)"
     
     echo -e "\n${YELLOW}4. Saved traffic:${NC}"
-    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
     echo "  Previously saved: $(format_bytes ${saved:-0})"
     
     echo -e "\n${YELLOW}5. Total traffic:${NC}"
@@ -184,9 +207,14 @@ debug_traffic() {
 # Get total traffic (saved + unsaved session traffic)
 get_traffic() {
     local user=$1
-    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
     local session=$(get_session_traffic "$user")
-    echo $((${saved:-0} + ${session:-0}))
+    
+    # Clean and validate
+    saved=${saved:-0}
+    session=${session:-0}
+    
+    echo $((saved + session))
 }
 
 # Save traffic: add session traffic to saved total and update baseline
@@ -194,14 +222,22 @@ save_traffic() {
     local user=$1
     local raw=$(get_proc_io_raw "$user")
     
+    # Clean and validate
+    raw=$(echo "$raw" | tr -d '\n \t')
+    raw=${raw:-0}
+    
     # Only save if user has an active session with traffic
-    if [ "$raw" -gt 0 ]; then
+    if [ "$raw" -gt 0 ] 2>/dev/null; then
         local session=$(get_session_traffic "$user")
-        local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2)
+        local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+        
+        # Clean and validate
+        session=${session:-0}
+        saved=${saved:-0}
         
         # Only add if there's actual new session traffic
-        if [ "$session" -gt 0 ]; then
-            local new_total=$((${saved:-0} + session))
+        if [ "$session" -gt 0 ] 2>/dev/null; then
+            local new_total=$((saved + session))
             sed -i "/^$user:/d" "$TRAFFIC_FILE"
             echo "$user:$new_total" >> "$TRAFFIC_FILE"
             
@@ -229,22 +265,28 @@ reset_traffic() {
 # Get/Set traffic limit
 get_limit() {
     local user=$1
-    grep "^$user:" "$LIMITS_FILE" 2>/dev/null | cut -d: -f2
+    local limit=$(grep "^$user:" "$LIMITS_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    echo "${limit:-0}"
 }
 
 set_limit() {
     local user=$1 limit=$2
+    
+    # Clean and validate limit
+    limit=$(echo "$limit" | tr -d '\n \t')
+    limit=${limit:-0}
+    
     sed -i "/^$user:/d" "$LIMITS_FILE"
     echo "$user:$limit" >> "$LIMITS_FILE"
     
     # If setting a new limit, check if user should be unlocked
-    if [ "$limit" -eq 0 ]; then
+    if [ "$limit" -eq 0 ] 2>/dev/null; then
         # Removing limit - unlock if was locked for traffic
         unlock_user_if_traffic_locked "$user"
     else
         # Check if new limit allows user to be unlocked
         local traffic=$(get_traffic "$user")
-        if [ "$traffic" -lt "$limit" ]; then
+        if [ "$traffic" -lt "$limit" ] 2>/dev/null; then
             unlock_user_if_traffic_locked "$user"
         fi
     fi
@@ -282,14 +324,18 @@ check_and_enforce_limit() {
     local traffic=$(get_traffic "$user")
     local limit=$(get_limit "$user")
     
+    # Clean and validate
+    traffic=${traffic:-0}
+    limit=${limit:-0}
+    
     # If no limit or unlimited, ensure user is unlocked (if was traffic-locked)
-    if [ -z "$limit" ] || [ "$limit" -eq 0 ]; then
+    if [ "$limit" -eq 0 ] 2>/dev/null; then
         unlock_user_if_traffic_locked "$user"
         return 0
     fi
     
     # If over limit, lock account and kill sessions
-    if [ "$traffic" -ge "$limit" ]; then
+    if [ "$traffic" -ge "$limit" ] 2>/dev/null; then
         save_traffic "$user"
         kill_user_sessions "$user"
         lock_user_for_traffic "$user"
