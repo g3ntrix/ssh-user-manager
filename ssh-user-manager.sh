@@ -214,6 +214,14 @@ get_traffic() {
     saved=${saved:-0}
     session=${session:-0}
     
+    # Protection against negative/corrupted values
+    if [ "$saved" -lt 0 ] 2>/dev/null; then
+        saved=0
+    fi
+    if [ "$session" -lt 0 ] 2>/dev/null; then
+        session=0
+    fi
+    
     echo $((saved + session))
 }
 
@@ -238,6 +246,12 @@ save_traffic() {
         # Only add if there's actual new session traffic
         if [ "$session" -gt 0 ] 2>/dev/null; then
             local new_total=$((saved + session))
+            
+            # Protection against overflow - if total goes negative, cap it
+            if [ "$new_total" -lt 0 ] 2>/dev/null; then
+                new_total=$saved
+            fi
+            
             sed -i "/^$user:/d" "$TRAFFIC_FILE"
             echo "$user:$new_total" >> "$TRAFFIC_FILE"
             
