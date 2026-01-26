@@ -115,7 +115,7 @@ get_proc_io_raw() {
 # Get baseline (already counted traffic) for user
 get_baseline() {
     local user=$1
-    local baseline=$(grep "^$user:" "$BASELINE_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    local baseline=$(grep "^$user:" "$BASELINE_FILE" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d '\n \t')
     echo "${baseline:-0}"
 }
 
@@ -194,7 +194,7 @@ debug_traffic() {
     echo "  Current session: $(format_bytes $session)"
     
     echo -e "\n${YELLOW}4. Saved traffic:${NC}"
-    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d '\n \t')
     echo "  Previously saved: $(format_bytes ${saved:-0})"
     
     echo -e "\n${YELLOW}5. Total traffic:${NC}"
@@ -207,7 +207,7 @@ debug_traffic() {
 # Get total traffic (saved + unsaved session traffic)
 get_traffic() {
     local user=$1
-    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d '\n \t')
     local session=$(get_session_traffic "$user")
     
     # Clean and validate
@@ -229,7 +229,7 @@ save_traffic() {
     # Only save if user has an active session with traffic
     if [ "$raw" -gt 0 ] 2>/dev/null; then
         local session=$(get_session_traffic "$user")
-        local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+        local saved=$(grep "^$user:" "$TRAFFIC_FILE" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d '\n \t')
         
         # Clean and validate
         session=${session:-0}
@@ -265,7 +265,7 @@ reset_traffic() {
 # Get/Set traffic limit
 get_limit() {
     local user=$1
-    local limit=$(grep "^$user:" "$LIMITS_FILE" 2>/dev/null | cut -d: -f2 | tr -d '\n \t')
+    local limit=$(grep "^$user:" "$LIMITS_FILE" 2>/dev/null | tail -1 | cut -d: -f2 | tr -d '\n \t')
     echo "${limit:-0}"
 }
 
