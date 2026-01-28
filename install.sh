@@ -99,9 +99,10 @@ echo -e "${YELLOW}Creating command symlink...${NC}"
 ln -sf "$INSTALL_DIR/ssh-user-manager.sh" "$BIN_LINK"
 chmod 755 "$BIN_LINK"
 
-# Function to setup SSH daemon to allow password authentication
+# Function to setup SSH daemon to allow password authentication and tunneling
 setup_sshd_config() {
     local sshd_config="/etc/ssh/sshd_config"
+    local sshd_config_d="/etc/ssh/sshd_config.d"
     
     if [ ! -f "$sshd_config" ]; then
         echo -e "    ${YELLOW}⊘${NC} SSHD config not found"
@@ -113,26 +114,48 @@ setup_sshd_config() {
         cp "$sshd_config" "${sshd_config}.original"
     fi
     
-    # Enable password authentication
-    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$sshd_config"
-    sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' "$sshd_config"
-    sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$sshd_config"
-    sed -i 's/^#*UsePAM.*/UsePAM yes/' "$sshd_config"
+    # Create our own config in sshd_config.d to override everything
+    if [ -d "$sshd_config_d" ]; then
+        cat > "${sshd_config_d}/00-ssh-user-manager.conf" << 'EOFSSHD'
+# SSH User Manager Configuration
+# This file enables password authentication and SSH tunneling for VPN use
+
+# Authentication
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+ChallengeResponseAuthentication yes
+UsePAM yes
+
+# Enable SSH tunneling/forwarding for VPN use
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+GatewayPorts yes
+PermitTunnel yes
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+
+# Allow all users to use tunneling
+PermitOpen any
+EOFSSHD
+        echo -e "    ${GREEN}✓${NC} Created ${sshd_config_d}/00-ssh-user-manager.conf"
+    fi
     
-    # Enable SSH tunneling/forwarding for VPN use
-    sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' "$sshd_config"
-    sed -i 's/^#*AllowStreamLocalForwarding.*/AllowStreamLocalForwarding yes/' "$sshd_config"
-    sed -i 's/^#*GatewayPorts.*/GatewayPorts yes/' "$sshd_config"
-    sed -i 's/^#*PermitTunnel.*/PermitTunnel yes/' "$sshd_config"
-    sed -i 's/^#*TCPKeepAlive.*/TCPKeepAlive yes/' "$sshd_config"
+    # Also add to main config in case config.d is not used
+    # Remove any existing restrictive settings first
+    sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' "$sshd_config"
+    sed -i 's/^PermitTunnel no/PermitTunnel yes/' "$sshd_config"
+    sed -i 's/^GatewayPorts no/GatewayPorts yes/' "$sshd_config"
+    sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' "$sshd_config"
     
-    # Add settings if they don't exist
-    grep -q "^PasswordAuthentication" "$sshd_config" || echo "PasswordAuthentication yes" >> "$sshd_config"
-    grep -q "^UsePAM" "$sshd_config" || echo "UsePAM yes" >> "$sshd_config"
+    # Add settings if they don't exist at all
     grep -q "^AllowTcpForwarding" "$sshd_config" || echo "AllowTcpForwarding yes" >> "$sshd_config"
     grep -q "^PermitTunnel" "$sshd_config" || echo "PermitTunnel yes" >> "$sshd_config"
     grep -q "^GatewayPorts" "$sshd_config" || echo "GatewayPorts yes" >> "$sshd_config"
     grep -q "^TCPKeepAlive" "$sshd_config" || echo "TCPKeepAlive yes" >> "$sshd_config"
+    grep -q "^PermitOpen" "$sshd_config" || echo "PermitOpen any" >> "$sshd_config"
+    grep -q "^ClientAliveInterval" "$sshd_config" || echo "ClientAliveInterval 60" >> "$sshd_config"
+    grep -q "^ClientAliveCountMax" "$sshd_config" || echo "ClientAliveCountMax 3" >> "$sshd_config"
     
     # Restart SSH service
     systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null
@@ -161,37 +184,12 @@ setup_pam_config() {
     
     # Create proper PAM configuration
     cat > "$pam_file" << 'EOFPAM'
-# Updated by SSH User Manager - $(date)
+# Updated by SSH User Manager
 # /etc/pam.d/common-password - password-related modules common to all services
-#
-# This file is included from other service-specific PAM config files,
-# and should contain a list of modules that define the services to be
-# used to change user passwords.  The default is pam_unix.
 
-# Explanation of pam_unix options:
-# The "yescrypt" option enables hashed passwords using the yescrypt algorithm,
-# introduced in Debian 11. Without this option, the default is Unix crypt.
-# Prior releases used the option "sha512"; if a shadow password hash will be
-# shared between Debian 11 and older releases replace "yescrypt" with "sha512"
-# for compatibility. The "obscure" option replaces the old `OBSCURE_CHECKS_ENAB'
-# option in login.defs. See the pam_unix manpage for other options.
-
-# As of pam 1.0.1-6, this file is managed by pam-auth-update by default.
-# To take advantage of this, it is recommended that you configure any
-# local modules either before or after the default block, and use
-# pam-auth-update to manage selection of other modules. See
-# pam-auth-update(8) for details.
-
-# here are the per-package modules (the "Primary" block)
 password   [success=1 default=ignore] pam_unix.so obscure use_authtok try_first_pass yescrypt
-# here's the fallback if no module succeeds
 password   requisite pam_deny.so
-# prime the stack with a positive return value if there isn't one already;
-# this avoids us returning an error just because nothing sets a success code
-# since the modules above will each just jump around
 password   required pam_permit.so
-# and here are more per-package modules (the "Additional" block)
-# end of pam-auth-update config
 EOFPAM
     
     echo -e "    ${GREEN}✓${NC} PAM configured"
