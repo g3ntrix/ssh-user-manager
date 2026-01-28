@@ -21,9 +21,16 @@ CONFIG_DIR="/etc/ssh-user-manager"
 VERSION="3.0"
 
 # Check root
-if [ "$EUID" -ne 0 ]; then 
+if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}This installer requires root privileges${NC}"
     echo "Run with: sudo bash install.sh"
+    exit 1
+fi
+
+# Check if curl is available
+if ! command -v curl &> /dev/null; then
+    echo -e "${RED}curl is required but not installed${NC}"
+    echo "Install curl first: apt-get update && apt-get install -y curl"
     exit 1
 fi
 
