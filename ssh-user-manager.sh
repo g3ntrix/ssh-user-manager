@@ -18,6 +18,7 @@ CONFIG_DIR="/etc/ssh-user-manager"
 TRAFFIC_FILE="$CONFIG_DIR/traffic_usage.dat"
 LIMITS_FILE="$CONFIG_DIR/traffic_limits.dat"
 EXCLUDED_USERS="nobody|linuxuser"
+PAM_COMMON_PASSWORD="/etc/pam.d/common-password"
 
 # Check root
 if [ "$EUID" -ne 0 ]; then 
@@ -25,10 +26,65 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Setup PAM configuration for SSH authentication
+setup_pam_ssh() {
+    if [ ! -f "$PAM_COMMON_PASSWORD" ]; then
+        return 0  # File doesn't exist on non-Debian systems
+    fi
+    
+    # Check if already configured
+    if grep -q "SSH User Manager" "$PAM_COMMON_PASSWORD" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Backup original if not already backed up
+    if [ ! -f "${PAM_COMMON_PASSWORD}.original" ]; then
+        cp "$PAM_COMMON_PASSWORD" "${PAM_COMMON_PASSWORD}.original"
+    fi
+    
+    # Create proper PAM configuration for SSH key + password authentication
+    cat > "$PAM_COMMON_PASSWORD" << 'EOFPAM'
+# Updated by SSH User Manager - $(date)
+# /etc/pam.d/common-password - password-related modules common to all services
+#
+# This file is included from other service-specific PAM config files,
+# and should contain a list of modules that define the services to be
+# used to change user passwords.  The default is pam_unix.
+
+# Explanation of pam_unix options:
+# The "yescrypt" option enables hashed passwords using the yescrypt algorithm,
+# introduced in Debian 11. Without this option, the default is Unix crypt.
+# Prior releases used the option "sha512"; if a shadow password hash will be
+# shared between Debian 11 and older releases replace "yescrypt" with "sha512"
+# for compatibility. The "obscure" option replaces the old `OBSCURE_CHECKS_ENAB'
+# option in login.defs. See the pam_unix manpage for other options.
+
+# As of pam 1.0.1-6, this file is managed by pam-auth-update by default.
+# To take advantage of this, it is recommended that you configure any
+# local modules either before or after the default block, and use
+# pam-auth-update to manage selection of other modules. See
+# pam-auth-update(8) for details.
+
+# here are the per-package modules (the "Primary" block)
+password   [success=1 default=ignore] pam_unix.so obscure use_authtok try_first_pass yescrypt
+# here's the fallback if no module succeeds
+password   requisite pam_deny.so
+# prime the stack with a positive return value if there isn't one already;
+# this avoids us returning an error just because nothing sets a success code
+# since the modules above will each just jump around
+password   required pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+EOFPAM
+}
+
 # Initialize
 init() {
     mkdir -p "$CONFIG_DIR"
     touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat" "$CONFIG_DIR/traffic_locked.dat"
+    
+    # Setup PAM configuration for SSH authentication
+    setup_pam_ssh
     
     # Ensure nethogs is installed
     which nethogs >/dev/null 2>&1 || apt-get install -y nethogs >/dev/null 2>&1

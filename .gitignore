@@ -1,0 +1,16 @@
+# System files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Local config
+/config/
+*.local
+*.bak
+*.tmp
+
+# Logs
+*.log
