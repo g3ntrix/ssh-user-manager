@@ -525,57 +525,35 @@ create_user() {
     [ -z "$pass" ] && echo -e "${RED}Password required${NC}" && pause && return
     
     echo ""
-    echo -e "${CYAN}Expiration:${NC}"
-    echo "  1. 1 hour      4. 7 days"
-    echo "  2. 6 hours     5. Custom"
-    echo "  3. 1 day       6. Never"
-    read -p "Choice [4]: " exp_choice
+    echo -e "${CYAN}Expiration (e.g., 2h, 3d, 1w or 0 for never):${NC}"
+    read -p "Duration: " custom_exp
     
     local exp_hours=0
-    case ${exp_choice:-4} in
-        1) exp_hours=1 ;;
-        2) exp_hours=6 ;;
-        3) exp_hours=24 ;;
-        4) exp_hours=$((7 * 24)) ;;
-        5) 
-            read -p "Enter duration (e.g., 2h, 3d, 1w): " custom_exp
-            case "$custom_exp" in
-                *h) exp_hours=${custom_exp%h} ;;
-                *d) exp_hours=$((${custom_exp%d} * 24)) ;;
-                *w) exp_hours=$((${custom_exp%w} * 24 * 7)) ;;
-                *) exp_hours=$custom_exp ;;
-            esac
-            ;;
-        6) exp_hours=0 ;;
-        *) exp_hours=$((7 * 24)) ;;
-    esac
+    if [ -z "$custom_exp" ] || [ "$custom_exp" = "0" ]; then
+        exp_hours=0
+    else
+        case "$custom_exp" in
+            *h) exp_hours=${custom_exp%h} ;;
+            *d) exp_hours=$((${custom_exp%d} * 24)) ;;
+            *w) exp_hours=$((${custom_exp%w} * 24 * 7)) ;;
+            *) exp_hours=$custom_exp ;;
+        esac
+    fi
     
     echo ""
-    echo -e "${CYAN}Traffic Limit:${NC}"
-    echo "  1. 100 MB      5. 5 GB"
-    echo "  2. 500 MB      6. 10 GB"
-    echo "  3. 1 GB        7. Custom"
-    echo "  4. 2 GB        8. Unlimited"
-    read -p "Choice [8]: " lim_choice
+    echo -e "${CYAN}Traffic Limit (e.g., 500m, 2g or 0 for unlimited):${NC}"
+    read -p "Limit: " custom_lim
     
-    case ${lim_choice:-8} in
-        1) limit=$((100 * 1048576)) ;;
-        2) limit=$((500 * 1048576)) ;;
-        3) limit=$((1 * 1073741824)) ;;
-        4) limit=$((2 * 1073741824)) ;;
-        5) limit=$((5 * 1073741824)) ;;
-        6) limit=$((10 * 1073741824)) ;;
-        7) 
-            read -p "Enter limit (e.g., 500m, 2g): " custom_lim
-            case "$custom_lim" in
-                *m|*M) limit=$((${custom_lim%[mM]} * 1048576)) ;;
-                *g|*G) limit=$((${custom_lim%[gG]} * 1073741824)) ;;
-                *) limit=$((custom_lim * 1073741824)) ;;
-            esac
-            ;;
-        8) limit=0 ;;
-        *) limit=0 ;;
-    esac
+    local limit=0
+    if [ -z "$custom_lim" ] || [ "$custom_lim" = "0" ]; then
+        limit=0
+    else
+        case "$custom_lim" in
+            *m|*M) limit=$((${custom_lim%[mM]} * 1048576)) ;;
+            *g|*G) limit=$((${custom_lim%[gG]} * 1073741824)) ;;
+            *) limit=$((custom_lim * 1073741824)) ;;
+        esac
+    fi
     
     echo ""
     echo -e "${YELLOW}Creating user...${NC}"
@@ -1035,6 +1013,118 @@ view_traffic() {
 }
 
 #═══════════════════════════════════════════════════════════════════
+# ENABLE/DISABLE ACCOUNTS
+#═══════════════════════════════════════════════════════════════════
+
+disable_user() {
+    header
+    echo -e "${YELLOW}🔒 Disable User Account${NC}"
+    line
+    echo ""
+    
+    select_user "Select user to disable" || { pause; return; }
+    
+    usermod -L "$SELECTED_USER" 2>/dev/null
+    kill_user_sessions "$SELECTED_USER"
+    
+    echo ""
+    echo -e "${GREEN}✓ User '$SELECTED_USER' disabled${NC}"
+    pause
+}
+
+enable_user() {
+    header
+    echo -e "${GREEN}🔓 Enable User Account${NC}"
+    line
+    echo ""
+    
+    select_user "Select user to enable" || { pause; return; }
+    
+    usermod -U "$SELECTED_USER" 2>/dev/null
+    
+    echo ""
+    echo -e "${GREEN}✓ User '$SELECTED_USER' enabled${NC}"
+    pause
+}
+
+disable_all_users() {
+    header
+    echo -e "${RED}🔒 Disable ALL User Accounts${NC}"
+    line
+    echo ""
+    
+    local users=($(get_users))
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No users found${NC}"
+        pause
+        return
+    fi
+    
+    echo -e "${YELLOW}This will disable ${#users[@]} user(s):${NC}"
+    for u in "${users[@]}"; do
+        echo "  - $u"
+    done
+    echo ""
+    read -p "Type 'yes' to confirm: " confirm
+    
+    if [ "$confirm" != "yes" ]; then
+        echo -e "${YELLOW}Cancelled${NC}"
+        pause
+        return
+    fi
+    
+    echo ""
+    for user in "${users[@]}"; do
+        usermod -L "$user" 2>/dev/null
+        kill_user_sessions "$user"
+        echo -e "  ${GREEN}✓${NC} Disabled $user"
+    done
+    
+    echo ""
+    echo -e "${GREEN}✓ All users disabled${NC}"
+    pause
+}
+
+enable_all_users() {
+    header
+    echo -e "${GREEN}🔓 Enable ALL User Accounts${NC}"
+    line
+    echo ""
+    
+    local users=($(get_users))
+    
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "${YELLOW}No users found${NC}"
+        pause
+        return
+    fi
+    
+    echo -e "${YELLOW}This will enable ${#users[@]} user(s):${NC}"
+    for u in "${users[@]}"; do
+        echo "  - $u"
+    done
+    echo ""
+    read -p "Type 'yes' to confirm: " confirm
+    
+    if [ "$confirm" != "yes" ]; then
+        echo -e "${YELLOW}Cancelled${NC}"
+        pause
+        return
+    fi
+    
+    echo ""
+    for user in "${users[@]}"; do
+        usermod -U "$user" 2>/dev/null
+        echo -e "  ${GREEN}✓${NC} Enabled $user"
+    done
+    
+    echo ""
+    echo -e "${GREEN}✓ All users enabled${NC}"
+    pause
+}
+
+#═══════════════════════════════════════════════════════════════════
 # MAIN MENU
 #═══════════════════════════════════════════════════════════════════
 
@@ -1045,15 +1135,17 @@ main_menu() {
         line
         echo ""
         echo -e "  ${BOLD}USER MANAGEMENT${NC}"
-        echo -e "    ${CYAN}1${NC}. Create user        ${CYAN}4${NC}. Online users"
-        echo -e "    ${CYAN}2${NC}. Delete user        ${CYAN}5${NC}. List all users"
+        echo -e "    ${CYAN}1${NC}. Create user        ${CYAN}5${NC}. List all users"
+        echo -e "    ${CYAN}2${NC}. Delete user        ${CYAN}6${NC}. Online users"
         echo -e "    ${CYAN}3${NC}. Change password"
+        echo -e "    ${CYAN}4${NC}. Manage expiration"
         echo ""
-        echo -e "  ${BOLD}ACCOUNT SETTINGS${NC}"
-        echo -e "    ${CYAN}6${NC}. Manage expiration"
+        echo -e "  ${BOLD}ACCOUNT CONTROL${NC}"
+        echo -e "    ${CYAN}7${NC}. Disable user       ${CYAN}9${NC}. Disable all users"
+        echo -e "    ${CYAN}8${NC}. Enable user        ${CYAN}10${NC}. Enable all users"
         echo ""
         echo -e "  ${BOLD}TRAFFIC${NC}"
-        echo -e "    ${CYAN}7${NC}. Traffic Monitor    ${CYAN}8${NC}. Manage limits"
+        echo -e "    ${CYAN}11${NC}. Traffic Monitor   ${CYAN}12${NC}. Manage limits"
         echo ""
         line
         echo -e "    ${CYAN}0${NC}. Exit"
@@ -1065,11 +1157,15 @@ main_menu() {
             1) create_user ;;
             2) delete_user ;;
             3) change_password ;;
-            4) show_online ;;
+            4) manage_expiry ;;
             5) list_users ;;
-            6) manage_expiry ;;
-            7) view_traffic ;;
-            8) manage_traffic ;;
+            6) show_online ;;
+            7) disable_user ;;
+            8) enable_user ;;
+            9) disable_all_users ;;
+            10) enable_all_users ;;
+            11) view_traffic ;;
+            12) manage_traffic ;;
             0)
                 # Save traffic before exit
                 for u in $(get_users); do save_traffic "$u"; done
