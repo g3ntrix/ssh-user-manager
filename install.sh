@@ -99,60 +99,13 @@ echo -e "${YELLOW}Creating command symlink...${NC}"
 ln -sf "$INSTALL_DIR/ssh-user-manager.sh" "$BIN_LINK"
 chmod 755 "$BIN_LINK"
 
-# Initialize configuration
-echo -e "${YELLOW}Initializing configuration...${NC}"
-touch "$CONFIG_DIR/traffic_usage.dat"
-touch "$CONFIG_DIR/traffic_limits.dat"
-touch "$CONFIG_DIR/expiry_times.dat"
-touch "$CONFIG_DIR/baseline.dat"
-touch "$CONFIG_DIR/traffic_locked.dat"
-chmod 600 "$CONFIG_DIR"/*.dat
-
-# Configure PAM for SSH key + password login
-echo -e "${YELLOW}Configuring PAM for SSH authentication...${NC}"
-setup_pam_config
-
-# Install nethogs if needed
-if ! command -v nethogs &> /dev/null; then
-    echo -e "${YELLOW}Installing nethogs for traffic monitoring...${NC}"
-    if command -v apt-get &> /dev/null; then
-        apt-get update -qq
-        apt-get install -y nethogs > /dev/null 2>&1
-    elif command -v yum &> /dev/null; then
-        yum install -y nethogs > /dev/null 2>&1
-    elif command -v pacman &> /dev/null; then
-        pacman -Sy --noconfirm nethogs > /dev/null 2>&1
-    else
-        echo -e "${YELLOW}! Please install nethogs manually: sudo apt install nethogs${NC}"
-    fi
-fi
-
-# Success message
-echo ""
-echo -e "${GREEN}✓ Installation complete!${NC}"
-echo ""
-echo -e "${CYAN}Usage:${NC}"
-echo -e "  ${BOLD}ssh-user-manager${NC}       - Run the interactive menu"
-echo -e "  ${BOLD}sudo ssh-user-manager${NC}  - Run with administrative access (required)"
-echo ""
-echo -e "${CYAN}Configuration files:${NC}"
-echo -e "  ${BOLD}$CONFIG_DIR${NC}"
-echo ""
-echo -e "${CYAN}Installation directory:${NC}"
-echo -e "  ${BOLD}$INSTALL_DIR${NC}"
-echo ""
-echo -e "${YELLOW}Quick start:${NC}"
-echo "  1. Run: ${BOLD}sudo ssh-user-manager${NC}"
-echo "  2. Select '1' to create a new user"
-echo "  3. Follow the prompts"
-echo ""
-
 # Function to setup PAM configuration
 setup_pam_config() {
     local pam_file="/etc/pam.d/common-password"
     
     # Only modify if it exists (Debian/Ubuntu systems)
     if [ ! -f "$pam_file" ]; then
+        echo -e "    ${YELLOW}⊘${NC} PAM config not found (non-Debian system)"
         return 0
     fi
     
@@ -203,4 +156,50 @@ EOFPAM
     echo -e "    ${GREEN}✓${NC} PAM configured for SSH key + password authentication"
 }
 
+# Initialize configuration
+echo -e "${YELLOW}Initializing configuration...${NC}"
+touch "$CONFIG_DIR/traffic_usage.dat"
+touch "$CONFIG_DIR/traffic_limits.dat"
+touch "$CONFIG_DIR/expiry_times.dat"
+touch "$CONFIG_DIR/baseline.dat"
+touch "$CONFIG_DIR/traffic_locked.dat"
+chmod 600 "$CONFIG_DIR"/*.dat
+
+# Configure PAM for SSH key + password login
+echo -e "${YELLOW}Configuring PAM for SSH authentication...${NC}"
 setup_pam_config
+
+# Install nethogs if needed
+if ! command -v nethogs &> /dev/null; then
+    echo -e "${YELLOW}Installing nethogs for traffic monitoring...${NC}"
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq
+        apt-get install -y nethogs > /dev/null 2>&1
+    elif command -v yum &> /dev/null; then
+        yum install -y nethogs > /dev/null 2>&1
+    elif command -v pacman &> /dev/null; then
+        pacman -Sy --noconfirm nethogs > /dev/null 2>&1
+    else
+        echo -e "${YELLOW}! Please install nethogs manually: sudo apt install nethogs${NC}"
+    fi
+fi
+
+# Success message
+echo ""
+echo -e "${GREEN}✓ Installation complete!${NC}"
+echo ""
+echo -e "${CYAN}Usage:${NC}"
+echo -e "  ${BOLD}ssh-user-manager${NC}       - Run the interactive menu"
+echo -e "  ${BOLD}sudo ssh-user-manager${NC}  - Run with administrative access (required)"
+echo ""
+echo -e "${CYAN}Configuration files:${NC}"
+echo -e "  ${BOLD}$CONFIG_DIR${NC}"
+echo ""
+echo -e "${CYAN}Installation directory:${NC}"
+echo -e "  ${BOLD}$INSTALL_DIR${NC}"
+echo ""
+echo -e "${YELLOW}Quick start:${NC}"
+echo "  1. Run: ${BOLD}sudo ssh-user-manager${NC}"
+echo "  2. Select '1' to create a new user"
+echo "  3. Follow the prompts"
+echo ""
