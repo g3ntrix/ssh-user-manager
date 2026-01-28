@@ -99,6 +99,36 @@ echo -e "${YELLOW}Creating command symlink...${NC}"
 ln -sf "$INSTALL_DIR/ssh-user-manager.sh" "$BIN_LINK"
 chmod 755 "$BIN_LINK"
 
+# Function to setup SSH daemon to allow password authentication
+setup_sshd_config() {
+    local sshd_config="/etc/ssh/sshd_config"
+    
+    if [ ! -f "$sshd_config" ]; then
+        echo -e "    ${YELLOW}⊘${NC} SSHD config not found"
+        return 0
+    fi
+    
+    # Backup original if not already backed up
+    if [ ! -f "${sshd_config}.original" ]; then
+        cp "$sshd_config" "${sshd_config}.original"
+    fi
+    
+    # Enable password authentication
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$sshd_config"
+    sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' "$sshd_config"
+    sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$sshd_config"
+    sed -i 's/^#*UsePAM.*/UsePAM yes/' "$sshd_config"
+    
+    # Add settings if they don't exist
+    grep -q "^PasswordAuthentication" "$sshd_config" || echo "PasswordAuthentication yes" >> "$sshd_config"
+    grep -q "^UsePAM" "$sshd_config" || echo "UsePAM yes" >> "$sshd_config"
+    
+    # Restart SSH service
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null
+    
+    echo -e "    ${GREEN}✓${NC} SSH password authentication enabled"
+}
+
 # Function to setup PAM configuration
 setup_pam_config() {
     local pam_file="/etc/pam.d/common-password"
@@ -153,7 +183,7 @@ password   required pam_permit.so
 # end of pam-auth-update config
 EOFPAM
     
-    echo -e "    ${GREEN}✓${NC} PAM configured for SSH key + password authentication"
+    echo -e "    ${GREEN}✓${NC} PAM configured"
 }
 
 # Initialize configuration
@@ -165,8 +195,9 @@ touch "$CONFIG_DIR/baseline.dat"
 touch "$CONFIG_DIR/traffic_locked.dat"
 chmod 600 "$CONFIG_DIR"/*.dat
 
-# Configure PAM for SSH key + password login
-echo -e "${YELLOW}Configuring PAM for SSH authentication...${NC}"
+# Configure SSH and PAM
+echo -e "${YELLOW}Configuring SSH authentication...${NC}"
+setup_sshd_config
 setup_pam_config
 
 # Install nethogs if needed
