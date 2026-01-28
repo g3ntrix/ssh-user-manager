@@ -17,7 +17,7 @@ NC='\033[0m'
 CONFIG_DIR="/etc/ssh-user-manager"
 TRAFFIC_FILE="$CONFIG_DIR/traffic_usage.dat"
 LIMITS_FILE="$CONFIG_DIR/traffic_limits.dat"
-EXCLUDED_USERS="nobody|linuxuser"
+EXCLUDED_USERS="nobody|linuxuser|root|ubuntu|opc|centos|ec2-user|admin|debian|fedora|azureuser|cloud-user"
 PAM_COMMON_PASSWORD="/etc/pam.d/common-password"
 
 # Check root
