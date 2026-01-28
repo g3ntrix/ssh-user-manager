@@ -580,8 +580,8 @@ create_user() {
     echo ""
     echo -e "${YELLOW}Creating user...${NC}"
     
-    # Create user
-    useradd -m -s /bin/bash "$username" 2>/dev/null
+    # Create user with /bin/false shell (VPN only, no terminal access)
+    useradd -m -s /bin/false "$username" 2>/dev/null
     if [ $? -ne 0 ]; then
         echo -e "${RED}Failed to create user${NC}"
         pause
@@ -616,6 +616,7 @@ create_user() {
     
     echo ""
     echo -e "${GREEN}✓ User '$username' created successfully${NC}"
+    echo -e "  ${CYAN}Access: VPN/Tunneling only (no shell access)${NC}"
     if [ "$exp_hours" -gt 0 ]; then
         if [ "$exp_hours" -lt 24 ]; then
             echo -e "  Expires in: ${exp_hours} hour(s)"
