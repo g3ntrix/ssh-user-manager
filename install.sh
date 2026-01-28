@@ -119,14 +119,25 @@ setup_sshd_config() {
     sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$sshd_config"
     sed -i 's/^#*UsePAM.*/UsePAM yes/' "$sshd_config"
     
+    # Enable SSH tunneling/forwarding for VPN use
+    sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' "$sshd_config"
+    sed -i 's/^#*AllowStreamLocalForwarding.*/AllowStreamLocalForwarding yes/' "$sshd_config"
+    sed -i 's/^#*GatewayPorts.*/GatewayPorts yes/' "$sshd_config"
+    sed -i 's/^#*PermitTunnel.*/PermitTunnel yes/' "$sshd_config"
+    sed -i 's/^#*TCPKeepAlive.*/TCPKeepAlive yes/' "$sshd_config"
+    
     # Add settings if they don't exist
     grep -q "^PasswordAuthentication" "$sshd_config" || echo "PasswordAuthentication yes" >> "$sshd_config"
     grep -q "^UsePAM" "$sshd_config" || echo "UsePAM yes" >> "$sshd_config"
+    grep -q "^AllowTcpForwarding" "$sshd_config" || echo "AllowTcpForwarding yes" >> "$sshd_config"
+    grep -q "^PermitTunnel" "$sshd_config" || echo "PermitTunnel yes" >> "$sshd_config"
+    grep -q "^GatewayPorts" "$sshd_config" || echo "GatewayPorts yes" >> "$sshd_config"
+    grep -q "^TCPKeepAlive" "$sshd_config" || echo "TCPKeepAlive yes" >> "$sshd_config"
     
     # Restart SSH service
     systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null
     
-    echo -e "    ${GREEN}✓${NC} SSH password authentication enabled"
+    echo -e "    ${GREEN}✓${NC} SSH password auth + VPN tunneling enabled"
 }
 
 # Function to setup PAM configuration
