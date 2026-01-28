@@ -173,16 +173,10 @@ setup_pam_config
 if ! command -v nethogs &> /dev/null; then
     echo -e "${YELLOW}Installing nethogs for traffic monitoring...${NC}"
     if command -v apt-get &> /dev/null; then
-        # Wait for apt lock to be released (max 60 seconds)
-        echo -e "  Waiting for package manager..."
-        for i in {1..30}; do
-            if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-               ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
-               ! fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
-                break
-            fi
-            sleep 2
-        done
+        # Kill any stuck apt processes
+        killall apt apt-get 2>/dev/null || true
+        rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend 2>/dev/null || true
+        dpkg --configure -a 2>/dev/null || true
         apt-get update -qq 2>/dev/null || true
         apt-get install -y nethogs >/dev/null 2>&1 && echo -e "  ${GREEN}✓${NC} nethogs installed" || echo -e "  ${YELLOW}!${NC} Install manually: sudo apt install nethogs"
     elif command -v yum &> /dev/null; then
