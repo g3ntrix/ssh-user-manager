@@ -17,6 +17,7 @@ NC='\033[0m'
 CONFIG_DIR="/etc/ssh-user-manager"
 TRAFFIC_FILE="$CONFIG_DIR/traffic_usage.dat"
 LIMITS_FILE="$CONFIG_DIR/traffic_limits.dat"
+PASSWORDS_FILE="$CONFIG_DIR/passwords.dat"
 EXCLUDED_USERS="nobody|linuxuser|root|ubuntu|opc|centos|ec2-user|admin|debian|fedora|azureuser|cloud-user"
 PAM_COMMON_PASSWORD="/etc/pam.d/common-password"
 
@@ -81,7 +82,8 @@ EOFPAM
 # Initialize
 init() {
     mkdir -p "$CONFIG_DIR"
-    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat" "$CONFIG_DIR/traffic_locked.dat"
+    touch "$TRAFFIC_FILE" "$LIMITS_FILE" "$PASSWORDS_FILE" "$CONFIG_DIR/expiry_times.dat" "$CONFIG_DIR/baseline.dat" "$CONFIG_DIR/traffic_locked.dat"
+    chmod 600 "$PASSWORDS_FILE"
     
     # Setup PAM configuration for SSH authentication
     setup_pam_ssh
@@ -574,6 +576,9 @@ create_user() {
         usermod -p "$hash" "$username"
     fi
     
+    # Store password for later retrieval
+    echo "$username:$pass" >> "$PASSWORDS_FILE"
+    
     # Set expiry
     if [ "$exp_hours" -gt 0 ]; then
         local exp_date=$(date -d "+$exp_hours hours" +%Y-%m-%d)
@@ -606,8 +611,8 @@ create_user() {
     fi
     [ "$limit" -gt 0 ] && echo -e "  Traffic limit: $(format_bytes $limit)" || echo -e "  Traffic: Unlimited"
     
-    # Get server's public IP
-    local server_ip=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    # Get server's public IP (force IPv4)
+    local server_ip=$(curl -4 -s ifconfig.me 2>/dev/null || curl -4 -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
     
     # Display customer configuration
     echo ""
@@ -662,6 +667,9 @@ delete_user() {
     # Remove from config files
     sed -i "/^$SELECTED_USER:/d" "$TRAFFIC_FILE" 2>/dev/null
     sed -i "/^$SELECTED_USER:/d" "$LIMITS_FILE" 2>/dev/null
+    sed -i "/^$SELECTED_USER:/d" "$PASSWORDS_FILE" 2>/dev/null
+    sed -i "/^$SELECTED_USER:/d" "$CONFIG_DIR/expiry_times.dat" 2>/dev/null
+    sed -i "/^$SELECTED_USER:/d" "$CONFIG_DIR/traffic_locked.dat" 2>/dev/null
     
     # Delete user and home directory
     userdel -rf "$SELECTED_USER" 2>/dev/null
@@ -725,8 +733,12 @@ view_client_config() {
     
     select_user "Select user to view config" || { pause; return; }
     
-    # Get server's public IP
-    local server_ip=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    # Get server's public IP (force IPv4)
+    local server_ip=$(curl -4 -s ifconfig.me 2>/dev/null || curl -4 -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    # Get stored password
+    local stored_pass=$(grep "^$SELECTED_USER:" "$PASSWORDS_FILE" 2>/dev/null | cut -d: -f2)
+    [ -z "$stored_pass" ] && stored_pass="(not stored)"
     
     # Get user details
     local exp=$(get_expiry "$SELECTED_USER")
@@ -746,7 +758,7 @@ view_client_config() {
     echo "4. Host: $server_ip"
     echo "5. Port: 22"
     echo "6. user: $SELECTED_USER"
-    echo "7. password: (set by admin)"
+    echo "7. password: $stored_pass"
     echo "8. save"
     echo ""
     echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
