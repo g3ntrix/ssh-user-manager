@@ -959,7 +959,7 @@ get_user_speed() {
     fi
 }
 
-# Real-time traffic monitor
+# Real-time traffic monitor - Compact Table View
 view_traffic() {
     local users=($(get_users))
     
@@ -970,127 +970,112 @@ view_traffic() {
         return
     fi
     
+    # Hide cursor for cleaner display
+    tput civis 2>/dev/null
+    trap 'tput cnorm 2>/dev/null' RETURN
+    
     # Loop until user presses q
     while true; do
-        # Get nethogs data - capture all sshd related traffic
-        # Run nethogs for 2 cycles to get actual speed data
-        local nh_data=$(timeout 4 nethogs -t -c 2 2>/dev/null | grep -E "sshd|ssh")
+        # Build output in buffer first to prevent flicker
+        local output=""
+        local online_count=0
+        local total_count=${#users[@]}
         
-        clear
-        echo ""
-        echo -e "  ${BOLD}${CYAN}📊 TRAFFIC MONITOR${NC}                              $(date '+%H:%M:%S')"
-        echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
+        # Get nethogs data in background-ish (shorter timeout)
+        local nh_data=$(timeout 2 nethogs -t -c 2 2>/dev/null | grep -E "sshd|ssh")
+        
+        # Header
+        output+="\n"
+        output+="  ${BOLD}${CYAN}📊 TRAFFIC MONITOR${NC}  $(date '+%H:%M:%S')\n"
+        output+="  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        output+="  ${BOLD}ST  USER        USED         LIMIT        PCT   SPEED${NC}\n"
+        output+="  ${CYAN}──────────────────────────────────────────────────────────────────────────${NC}\n"
         
         for user in "${users[@]}"; do
             local traffic=$(get_traffic "$user")
             local limit=$(get_limit "$user")
-            local status=""
-            local speed_info=""
-            local bar=""
-            
-            # Check if online and get speed
-            # Use multiple methods: pgrep for sshd, or 'who' command for SSH sessions
-            local is_online=false
             local user_uid=$(id -u "$user" 2>/dev/null)
+            local speed_str="--"
+            local status_icon=""
+            local pct_str="--"
+            local limit_str="∞"
+            local row_color=""
             
-            if pgrep -u "$user" sshd >/dev/null 2>&1 || who | grep -q "^$user "; then
+            # Check online status
+            local is_online=false
+            if pgrep -u "$user" sshd >/dev/null 2>&1; then
                 is_online=true
-                # Search nethogs output by UID (nethogs shows /PID/UID format)
-                # Also try username in case format varies
+                ((online_count++))
+                status_icon="${GREEN}●${NC}"
+                
+                # Get speed from nethogs
                 local speed_line=""
                 if [ -n "$user_uid" ]; then
                     speed_line=$(echo "$nh_data" | grep -E "/$user_uid[^0-9]|/$user_uid$" | tail -1)
                 fi
-                # Fallback: search by username
-                if [ -z "$speed_line" ]; then
-                    speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
-                fi
+                [ -z "$speed_line" ] && speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
                 
                 if [ -n "$speed_line" ]; then
-                    # Get last two fields which are send and receive speeds
                     local sent=$(echo "$speed_line" | awk '{print $(NF-1)}')
                     local recv=$(echo "$speed_line" | awk '{print $NF}')
-                    # Validate they are numbers (can be decimal like 0.123)
                     if [[ "$sent" =~ ^[0-9]+\.?[0-9]*$ ]] && [[ "$recv" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-                        speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
+                        speed_str="↑$(printf '%4.1f' $sent)↓$(printf '%4.1f' $recv)"
                     else
-                        speed_info="${CYAN}active${NC}"
+                        speed_str="${CYAN}active${NC}"
                     fi
                 else
-                    speed_info="${CYAN}active${NC}"
+                    speed_str="${CYAN}active${NC}"
                 fi
+                
+                # Save traffic for online users
+                save_traffic "$user"
+            else
+                status_icon="${DIM}○${NC}"
+                speed_str="${DIM}offline${NC}"
             fi
             
-            # Calculate percentage and status
-            local pct=0
-            local limit_str="unlimited"
+            # Calculate percentage
             if [ -n "$limit" ] && [ "$limit" -gt 0 ]; then
-                pct=$((traffic * 100 / limit))
+                local pct=$((traffic * 100 / limit))
                 limit_str=$(format_bytes "$limit")
                 
                 if [ $traffic -ge $limit ]; then
-                    # ENFORCE: Lock account and kill session if over limit
+                    # Lock if over limit
                     if $is_online; then
-                        save_traffic "$user"
                         kill_user_sessions "$user"
                         lock_user_for_traffic "$user"
                         is_online=false
+                        status_icon="${RED}✖${NC}"
                     fi
                     if ! is_traffic_locked "$user"; then
                         lock_user_for_traffic "$user"
                     fi
-                    status="${RED}▌LOCKED${NC}"
-                    speed_info="${RED}blocked${NC}"
+                    pct_str="${RED}LOCK${NC}"
+                    speed_str="${RED}blocked${NC}"
+                    row_color="${RED}"
                 elif [ $pct -ge 90 ]; then
-                    status="${YELLOW}▌${pct}%${NC}"
+                    pct_str="${YELLOW}${pct}%${NC}"
+                    row_color="${YELLOW}"
+                elif [ $pct -ge 75 ]; then
+                    pct_str="${YELLOW}${pct}%${NC}"
                 else
-                    status="${GREEN}▌${pct}%${NC}"
+                    pct_str="${GREEN}${pct}%${NC}"
                 fi
-                
-                # Create progress bar
-                local filled=$((pct / 5))
-                [ $filled -gt 20 ] && filled=20
-                local empty=$((20 - filled))
-                if [ $pct -ge 100 ]; then
-                    bar="${RED}$(printf '█%.0s' $(seq 1 20))${NC}"
-                elif [ $pct -ge 90 ]; then
-                    bar="${YELLOW}$(printf '█%.0s' $(seq 1 $filled))${NC}$(printf '░%.0s' $(seq 1 $empty))"
-                else
-                    bar="${GREEN}$(printf '█%.0s' $(seq 1 $filled))${NC}$(printf '░%.0s' $(seq 1 $empty))"
-                fi
-            else
-                status="${GREEN}▌OK${NC}"
-                bar="$(printf '░%.0s' $(seq 1 20))"
             fi
             
-            # Save traffic for online users (so it's not lost if they disconnect)
-            if $is_online; then
-                save_traffic "$user"
-            fi
+            # Format values with padding
+            local traffic_str=$(format_bytes $traffic)
             
-            # Online indicator
-            local online_dot=""
-            if $is_online; then
-                online_dot="${GREEN}●${NC}"
-            else
-                online_dot="${YELLOW}○${NC}"
-                speed_info="${YELLOW}offline${NC}"
-            fi
-            
-            # Print user row
-            echo -e "  $online_dot ${BOLD}$user${NC}"
-            echo -e "    Used: $(format_bytes $traffic) / $limit_str  $status"
-            echo -e "    [$bar]"
-            if $is_online || [ "$speed_info" = "${YELLOW}offline${NC}" ]; then
-                echo -e "    $speed_info"
-            fi
-            echo ""
+            # Build row (compact single line)
+            output+="  $status_icon   $(printf '%-10s' "$user")  $(printf '%10s' "$traffic_str")  $(printf '%10s' "$limit_str")  $(printf '%5s' "$pct_str")  $speed_str\n"
         done
         
-        echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  ${CYAN}R${NC} Refresh  ${CYAN}Q${NC} Back"
-        echo ""
+        output+="  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        output+="  ${GREEN}●${NC} Online: $online_count/$total_count    ${CYAN}R${NC}=Refresh  ${CYAN}Q${NC}=Back    Auto-refresh: 3s\n"
+        
+        # Clear and display all at once (reduces flicker)
+        clear
+        echo -e "$output"
         
         # Read with timeout for auto-refresh
         read -t 3 -n 1 -s key
