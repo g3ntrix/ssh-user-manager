@@ -972,9 +972,9 @@ view_traffic() {
     
     # Loop until user presses q
     while true; do
-        # Get nethogs data - need at least 2 cycles to get real data
-        # Format: "sshd-session: USERNAME/PID/UID   SENT   RECEIVED"
-        local nh_data=$(timeout 3 nethogs -t -c 2 2>/dev/null | grep "sshd-session")
+        # Get nethogs data - capture all sshd related traffic
+        # Run nethogs for 2 cycles to get actual speed data
+        local nh_data=$(timeout 4 nethogs -t -c 2 2>/dev/null | grep -E "sshd|ssh")
         
         clear
         echo ""
@@ -992,17 +992,26 @@ view_traffic() {
             # Check if online and get speed
             # Use multiple methods: pgrep for sshd, or 'who' command for SSH sessions
             local is_online=false
+            local user_uid=$(id -u "$user" 2>/dev/null)
+            
             if pgrep -u "$user" sshd >/dev/null 2>&1 || who | grep -q "^$user "; then
                 is_online=true
-                # Search for any line containing the username in nethogs output
-                # Patterns: "sshd-session: user/", "sshd: user@", or just "user"
-                local speed_line=$(echo "$nh_data" | grep -E "(sshd.*$user|$user)" | tail -1)
+                # Search nethogs output by UID (nethogs shows /PID/UID format)
+                # Also try username in case format varies
+                local speed_line=""
+                if [ -n "$user_uid" ]; then
+                    speed_line=$(echo "$nh_data" | grep -E "/$user_uid[^0-9]|/$user_uid$" | tail -1)
+                fi
+                # Fallback: search by username
+                if [ -z "$speed_line" ]; then
+                    speed_line=$(echo "$nh_data" | grep -i "$user" | tail -1)
+                fi
                 
                 if [ -n "$speed_line" ]; then
                     # Get last two fields which are send and receive speeds
                     local sent=$(echo "$speed_line" | awk '{print $(NF-1)}')
                     local recv=$(echo "$speed_line" | awk '{print $NF}')
-                    # Validate they are numbers
+                    # Validate they are numbers (can be decimal like 0.123)
                     if [[ "$sent" =~ ^[0-9]+\.?[0-9]*$ ]] && [[ "$recv" =~ ^[0-9]+\.?[0-9]*$ ]]; then
                         speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
                     else
