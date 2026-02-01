@@ -994,15 +994,20 @@ view_traffic() {
             local is_online=false
             if pgrep -u "$user" sshd >/dev/null 2>&1 || who | grep -q "^$user "; then
                 is_online=true
-                # Search for "sshd-session: USERNAME/" pattern
-                local speed_line=$(echo "$nh_data" | grep "sshd-session: $user/" | tail -1)
+                # Search for any line containing the username in nethogs output
+                # Patterns: "sshd-session: user/", "sshd: user@", or just "user"
+                local speed_line=$(echo "$nh_data" | grep -E "(sshd.*$user|$user)" | tail -1)
                 
                 if [ -n "$speed_line" ]; then
-                    # Format: sshd-session: user/pid/uid   0.123   0.456
-                    # Use awk to get last two fields
+                    # Get last two fields which are send and receive speeds
                     local sent=$(echo "$speed_line" | awk '{print $(NF-1)}')
                     local recv=$(echo "$speed_line" | awk '{print $NF}')
-                    speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
+                    # Validate they are numbers
+                    if [[ "$sent" =~ ^[0-9]+\.?[0-9]*$ ]] && [[ "$recv" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                        speed_info="↑$(printf '%.1f' $sent) ↓$(printf '%.1f' $recv) KB/s"
+                    else
+                        speed_info="${CYAN}active${NC}"
+                    fi
                 else
                     speed_info="${CYAN}active${NC}"
                 fi
