@@ -717,6 +717,49 @@ list_users() {
     pause
 }
 
+view_client_config() {
+    header
+    echo -e "${CYAN}📋 View Client Configuration${NC}"
+    line
+    echo ""
+    
+    select_user "Select user to view config" || { pause; return; }
+    
+    # Get server's public IP
+    local server_ip=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    # Get user details
+    local exp=$(get_expiry "$SELECTED_USER")
+    local traffic=$(format_bytes $(get_traffic "$SELECTED_USER"))
+    local limit=$(get_limit "$SELECTED_USER")
+    local limit_str="Unlimited"
+    [ -n "$limit" ] && [ "$limit" -gt 0 ] && limit_str=$(format_bytes "$limit")
+    
+    echo ""
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}  CLIENT CONFIGURATION${NC}"
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    echo ""
+    echo "1. Add config manually"
+    echo "2. ssh"
+    echo "3. remark: $SELECTED_USER"
+    echo "4. Host: $server_ip"
+    echo "5. Port: 22"
+    echo "6. user: $SELECTED_USER"
+    echo "7. password: (set by admin)"
+    echo "8. save"
+    echo ""
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}Account Details:${NC}"
+    echo "  Expires: $exp"
+    echo "  Traffic used: $traffic"
+    echo "  Traffic limit: $limit_str"
+    echo ""
+    
+    pause
+}
+
 show_online() {
     header
     echo -e "${CYAN}🟢 Online Users${NC}"
@@ -1157,15 +1200,15 @@ main_menu() {
         echo -e "  ${BOLD}USER MANAGEMENT${NC}"
         echo -e "    ${CYAN}1${NC}. Create user        ${CYAN}5${NC}. List all users"
         echo -e "    ${CYAN}2${NC}. Delete user        ${CYAN}6${NC}. Online users"
-        echo -e "    ${CYAN}3${NC}. Change password"
+        echo -e "    ${CYAN}3${NC}. Change password    ${CYAN}7${NC}. View client config"
         echo -e "    ${CYAN}4${NC}. Manage expiration"
         echo ""
         echo -e "  ${BOLD}ACCOUNT CONTROL${NC}"
-        echo -e "    ${CYAN}7${NC}. Disable user       ${CYAN}9${NC}. Disable all users"
-        echo -e "    ${CYAN}8${NC}. Enable user        ${CYAN}10${NC}. Enable all users"
+        echo -e "    ${CYAN}8${NC}. Disable user       ${CYAN}10${NC}. Disable all users"
+        echo -e "    ${CYAN}9${NC}. Enable user        ${CYAN}11${NC}. Enable all users"
         echo ""
         echo -e "  ${BOLD}TRAFFIC${NC}"
-        echo -e "    ${CYAN}11${NC}. Traffic Monitor   ${CYAN}12${NC}. Manage limits"
+        echo -e "    ${CYAN}12${NC}. Traffic Monitor   ${CYAN}13${NC}. Manage limits"
         echo ""
         line
         echo -e "    ${CYAN}0${NC}. Exit"
@@ -1180,12 +1223,13 @@ main_menu() {
             4) manage_expiry ;;
             5) list_users ;;
             6) show_online ;;
-            7) disable_user ;;
-            8) enable_user ;;
-            9) disable_all_users ;;
-            10) enable_all_users ;;
-            11) view_traffic ;;
-            12) manage_traffic ;;
+            7) view_client_config ;;
+            8) disable_user ;;
+            9) enable_user ;;
+            10) disable_all_users ;;
+            11) enable_all_users ;;
+            12) view_traffic ;;
+            13) manage_traffic ;;
             0)
                 # Save traffic before exit
                 for u in $(get_users); do save_traffic "$u"; done
