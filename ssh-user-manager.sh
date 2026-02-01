@@ -606,6 +606,26 @@ create_user() {
     fi
     [ "$limit" -gt 0 ] && echo -e "  Traffic limit: $(format_bytes $limit)" || echo -e "  Traffic: Unlimited"
     
+    # Get server's public IP
+    local server_ip=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    # Display customer configuration
+    echo ""
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}  CLIENT CONFIGURATION (Copy & Send)${NC}"
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    echo ""
+    echo "1. Add config manually"
+    echo "2. ssh"
+    echo "3. remark: $username"
+    echo "4. Host: $server_ip"
+    echo "5. Port: 22"
+    echo "6. user: $username"
+    echo "7. password: $pass"
+    echo "8. save"
+    echo ""
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════${NC}"
+    
     pause
 }
 
